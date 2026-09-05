@@ -1,5 +1,6 @@
 //! synod benchmark harness. Run: `zig build bench -- [filter]`
-//! Each benchmark prints `name  ops/s  ns/op` so results can be pasted into docs/milestones.md.
+//! Each benchmark prints `name  ops/s  ns/op` so results can be pasted into
+//! docs/plans/000-inherited.md.
 
 const std = @import("std");
 const synod = @import("synod");
