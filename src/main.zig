@@ -21,7 +21,8 @@ pub fn main() !void {
         try out.print("synod {f}\n", .{synod.version});
     } else {
         try out.print(
-            \\synod — The council where nodes reach consensus — Raft, membership, and failure detection for Zig
+            \\synod — The council where nodes reach consensus — Raft, membership, and failure
+            \\detection for Zig
             \\
             \\usage: synod <command>
             \\  version    print library version

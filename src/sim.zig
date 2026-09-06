@@ -1,4 +1,5 @@
-//! synod.sim — Deterministic simulation: virtual clock, virtual network (delay, loss, partition, reorder), scenarios, Raft safety invariants, linearizability checker.
+//! synod.sim — Deterministic simulation: virtual clock, virtual network (delay, loss,
+//! partition, reorder), scenarios, Raft safety invariants, linearizability checker.
 //!
 //! Planned files (see docs/PRD.md):
 //!   - `sim/clock.zig`

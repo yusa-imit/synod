@@ -1,4 +1,5 @@
-//! synod — The council where nodes reach consensus — Raft, membership, and failure detection for Zig
+//! synod — The council where nodes reach consensus — Raft, membership, and failure detection
+//! for Zig
 //!
 //! Library root. Consumers `@import("synod")` and reach modules as
 //! `synod.<module>`. Every module is independent; import only what you use.

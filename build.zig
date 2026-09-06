@@ -1,6 +1,7 @@
 const std = @import("std");
 
-/// Build graph for synod — The council where nodes reach consensus — Raft, membership, and failure detection for Zig
+/// Build graph for synod — The council where nodes reach consensus — Raft, membership, and
+/// failure detection for Zig.
 ///
 /// Steps:
 ///   zig build            — build library + CLI
@@ -45,6 +46,20 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // Tidy — Tiger Style size-floor checker (line length, function length).
+    const tidy_exe = b.addExecutable(.{
+        .name = "tidy",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/tidy.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const run_tidy = b.addRunArtifact(tidy_exe);
+    run_tidy.setCwd(b.path("."));
+    const tidy_step = b.step("tidy", "Check line length and function length limits");
+    tidy_step.dependOn(&run_tidy.step);
+    test_step.dependOn(&run_tidy.step);
 
     // Benchmarks
     const bench = b.addExecutable(.{

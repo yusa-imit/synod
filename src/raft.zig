@@ -1,4 +1,5 @@
-//! synod.raft — Pure state machine: election (PreVote), replication, progress tracking, snapshot, joint-consensus membership, ReadIndex and lease reads.
+//! synod.raft — Pure state machine: election (PreVote), replication, progress tracking,
+//! snapshot, joint-consensus membership, ReadIndex and lease reads.
 //!
 //! Planned files (see docs/PRD.md):
 //!   - `raft/node.zig`
