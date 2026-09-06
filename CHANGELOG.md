@@ -19,3 +19,8 @@ All notable changes to this project are documented in this file. Format follows
   dependency) enforces line length ≤ 100 columns and function length ≤ 70 lines, with a
   `tools/tidy_baseline.txt` red-zone allowance (≤ 72 lines) for pre-existing functions listed
   there by `path:function:lines`.
+- `tools/tidy.zig` ban list: `zig build tidy` now also rejects `catch unreachable` without a
+  `// proof:` comment on the same or previous line, `std.debug.print`/`std.time.*` in `src/`,
+  a `usize` field inside a wire/format struct (`Message`, `Entry`, `HardState`, `Snapshot`),
+  and any `.zig` file missing a `//!` module header. `build.zig` and `src/main.zig` gained the
+  headers they lacked.

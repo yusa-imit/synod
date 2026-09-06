@@ -1,4 +1,4 @@
-//! tools/tidy.zig — Tiger Style size-floor checker: line length and function length.
+//! tools/tidy.zig — Tiger Style size-floor and ban-list checker.
 //!
 //! Pure, in-memory functions only; no file I/O happens here. `main()` (added alongside the
 //! real implementation) walks `src/` and feeds each file's path and contents into these
@@ -11,9 +11,16 @@
 //! baseline-covered function. A `BaselineEntry.lines_max` value above the red zone cap is
 //! clamped down, never trusted past it — an entry cannot buy more than 72 lines.
 //!
-//! `main()` walks `src/` recursively, checks every `*.zig` file against both rules (loading
-//! `tools/tidy_baseline.txt` when present), prints violations to stderr, and exits non-zero
-//! if any file has one.
+//! Every checker here is a naive line/substring/brace scan, not a real Zig parser: none is
+//! comment- or string-literal-aware, so a pattern inside a `//` comment or a string constant
+//! can false-positive. This matches the file's existing size checks and keeps the tool
+//! dependency-free; a false positive is cheap to silence at the call site (reword the line).
+//!
+//! `main()` walks `src/` recursively, checks every `*.zig` file against the size rules, the
+//! ban list (`catch unreachable` without `// proof:`, `std.debug.print`, `std.time.*`, `usize`
+//! in a wire struct, a missing `//!` header), loading `tools/tidy_baseline.txt` when present,
+//! also checks `build.zig`'s header, prints violations to stderr, and exits non-zero if any
+//! file had one.
 
 const std = @import("std");
 const testing = std.testing;
@@ -238,6 +245,204 @@ fn allowedFunctionLines(baseline: []const BaselineEntry, path: []const u8, name:
     return function_lines_max;
 }
 
+pub const CatchUnreachableViolation = struct {
+    path: []const u8,
+    line: u32,
+};
+
+pub const BannedPatternViolation = struct {
+    path: []const u8,
+    line: u32,
+    pattern: []const u8,
+};
+
+pub const WireUsizeViolation = struct {
+    path: []const u8,
+    line: u32,
+    type_name: []const u8,
+};
+
+/// Wire/format structs whose fields must stay `u64` — `usize` differs across the 6
+/// cross-compile targets, so it may never appear inside these on-wire types.
+pub const wire_struct_names = [_][]const u8{ "Message", "Entry", "HardState", "Snapshot" };
+
+/// Precondition: `path` and `source` outlive the returned slice.
+/// Postcondition: one `CatchUnreachableViolation` per line containing `catch unreachable`
+/// that has no `// proof:` comment on that same line or on the line immediately before it.
+pub fn checkCatchUnreachable(
+    gpa: Allocator,
+    path: []const u8,
+    source: []const u8,
+) Allocator.Error![]CatchUnreachableViolation {
+    assert(path.len > 0);
+
+    var violations: std.ArrayList(CatchUnreachableViolation) = .empty;
+    errdefer violations.deinit(gpa);
+
+    const line_count = std.mem.count(u8, source, "\n") + 1;
+    var prev_line: ?[]const u8 = null;
+    var line_number: u32 = 1;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| : (line_number += 1) {
+        defer prev_line = line;
+        if (std.mem.indexOf(u8, line, "catch unreachable") == null) continue;
+        const proof_here = std.mem.indexOf(u8, line, "// proof:") != null;
+        const proof_before = if (prev_line) |p|
+            std.mem.indexOf(u8, p, "// proof:") != null
+        else
+            false;
+        if (proof_here or proof_before) continue;
+        try violations.append(gpa, .{ .path = path, .line = line_number });
+    }
+
+    assert(violations.items.len <= line_count);
+    return violations.toOwnedSlice(gpa);
+}
+
+/// Precondition: `path`, `source`, and `pattern` outlive the returned slice.
+/// Postcondition: one `BannedPatternViolation` per line containing `pattern` as a substring.
+pub fn checkBannedPattern(
+    gpa: Allocator,
+    path: []const u8,
+    source: []const u8,
+    pattern: []const u8,
+) Allocator.Error![]BannedPatternViolation {
+    assert(path.len > 0);
+    assert(pattern.len > 0);
+
+    var violations: std.ArrayList(BannedPatternViolation) = .empty;
+    errdefer violations.deinit(gpa);
+
+    const line_count = std.mem.count(u8, source, "\n") + 1;
+    var line_number: u32 = 1;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| : (line_number += 1) {
+        if (std.mem.indexOf(u8, line, pattern) == null) continue;
+        try violations.append(gpa, .{ .path = path, .line = line_number, .pattern = pattern });
+    }
+
+    assert(violations.items.len <= line_count);
+    return violations.toOwnedSlice(gpa);
+}
+
+/// True if `c` may appear inside a Zig identifier.
+fn isIdentChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
+/// True if `haystack` contains `word` as a whole identifier token, not as a substring of a
+/// longer identifier (so `usize` does not match `my_usize_thing`).
+fn containsWord(haystack: []const u8, word: []const u8) bool {
+    assert(word.len > 0);
+
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, from, word)) |at| {
+        const before_ok = at == 0 or !isIdentChar(haystack[at - 1]);
+        const after = at + word.len;
+        const after_ok = after >= haystack.len or !isIdentChar(haystack[after]);
+        if (before_ok and after_ok) return true;
+        from = at + 1;
+    }
+    return false;
+}
+
+/// Returns the byte offset just past a whole-word occurrence of `name` in `source` at or
+/// after `from` that is (across any run of spaces, tabs, or newlines) followed by `=` and
+/// then `struct` or `union`, or `null` if none remains.
+fn findWireDeclEnd(source: []const u8, from: usize, name: []const u8) ?usize {
+    assert(name.len > 0);
+    assert(from <= source.len);
+
+    var search_from = from;
+    while (std.mem.indexOfPos(u8, source, search_from, name)) |at| {
+        search_from = at + 1;
+        const before_ok = at == 0 or !isIdentChar(source[at - 1]);
+        const after_ok = at + name.len < source.len and !isIdentChar(source[at + name.len]);
+        if (!before_ok or !after_ok) continue;
+
+        const after_name = std.mem.trimLeft(u8, source[at + name.len ..], " \t\r\n");
+        if (!std.mem.startsWith(u8, after_name, "=")) continue;
+        const after_eq = std.mem.trimLeft(u8, after_name[1..], " \t\r\n");
+        const is_struct = std.mem.startsWith(u8, after_eq, "struct");
+        const is_union = std.mem.startsWith(u8, after_eq, "union");
+        if (!is_struct and !is_union) continue;
+        return at + name.len;
+    }
+    return null;
+}
+
+/// Precondition: `path` and `source` outlive the returned slice.
+/// Postcondition: one `WireUsizeViolation` per line inside a `pub const <Name> = struct {`
+/// or `= union(enum) {` block (for each `Name` in `wire_struct_names`) that contains the
+/// whole word `usize`. Declaration and closing-brace lines are excluded.
+pub fn checkWireUsize(
+    gpa: Allocator,
+    path: []const u8,
+    source: []const u8,
+) Allocator.Error![]WireUsizeViolation {
+    assert(path.len > 0);
+
+    var violations: std.ArrayList(WireUsizeViolation) = .empty;
+    errdefer violations.deinit(gpa);
+
+    const line_count = std.mem.count(u8, source, "\n") + 1;
+
+    for (wire_struct_names) |type_name| {
+        var from: usize = 0;
+        while (findWireDeclEnd(source, from, type_name)) |decl_end| {
+            const open = std.mem.indexOfScalarPos(u8, source, decl_end, '{') orelse break;
+            const decl_line = lineNumberAt(source, open);
+            const end = findFunctionEnd(source, decl_end, decl_line) orelse break;
+            assert(end.line >= decl_line);
+            from = open + 1;
+
+            const decl_end_of_line = std.mem.indexOfScalarPos(
+                u8,
+                source,
+                open,
+                '\n',
+            ) orelse source.len;
+            var offset = decl_end_of_line + 1;
+            var line_number = decl_line + 1;
+            while (line_number < end.line and offset <= source.len) {
+                const line_end = std.mem.indexOfScalarPos(u8, source, offset, '\n') orelse
+                    source.len;
+                const line = source[offset..line_end];
+                if (containsWord(line, "usize")) {
+                    try violations.append(gpa, .{
+                        .path = path,
+                        .line = line_number,
+                        .type_name = type_name,
+                    });
+                }
+                offset = line_end + 1;
+                line_number += 1;
+            }
+        }
+    }
+
+    assert(violations.items.len <= wire_struct_names.len * line_count);
+    return violations.toOwnedSlice(gpa);
+}
+
+/// Returns the 1-indexed line number containing byte `offset` of `source`.
+fn lineNumberAt(source: []const u8, offset: usize) u32 {
+    assert(offset <= source.len);
+    const number = @as(u32, @intCast(std.mem.count(u8, source[0..offset], "\n"))) + 1;
+    assert(number >= 1);
+    return number;
+}
+
+/// True if `source`'s very first line starts with a `//!` module doc comment.
+pub fn hasModuleHeader(source: []const u8) bool {
+    const first_line_end = std.mem.indexOfScalar(u8, source, '\n') orelse source.len;
+    assert(first_line_end <= source.len);
+    const first_line = source[0..first_line_end];
+    const has_header = std.mem.startsWith(u8, first_line, "//!");
+    assert(!has_header or first_line.len >= 3);
+    return has_header;
+}
+
 /// Reads `sub_path` under `dir` and returns its contents, or an empty slice if the file does
 /// not exist. Precondition: `gpa` outlives the returned slice; the caller frees it.
 fn readOptionalFile(gpa: Allocator, dir: std.fs.Dir, sub_path: []const u8) ![]u8 {
@@ -252,9 +457,9 @@ fn readOptionalFile(gpa: Allocator, dir: std.fs.Dir, sub_path: []const u8) ![]u8
     return contents;
 }
 
-/// Prints every violation in `line_violations` and `fn_violations` to stderr.
-/// Returns whether any violation was printed.
-fn reportViolations(
+/// Prints every size violation (line-length, function-length) to stderr. Returns whether any
+/// was printed.
+fn reportSizeViolations(
     path: []const u8,
     line_violations: []const LineViolation,
     fn_violations: []const FunctionViolation,
@@ -279,6 +484,53 @@ fn reportViolations(
     return line_violations.len > 0 or fn_violations.len > 0;
 }
 
+/// Prints every ban-list violation (catch unreachable, banned pattern, wire usize, missing
+/// module header) to stderr. Returns whether any was printed.
+fn reportBanViolations(
+    path: []const u8,
+    catch_violations: []const CatchUnreachableViolation,
+    debug_print_violations: []const BannedPatternViolation,
+    time_violations: []const BannedPatternViolation,
+    wire_violations: []const WireUsizeViolation,
+    missing_header: bool,
+) bool {
+    assert(path.len > 0);
+
+    const stderr = std.fs.File.stderr();
+    var buf: [512]u8 = undefined;
+    for (catch_violations) |v| {
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "{s}:{d}: catch unreachable without a // proof: comment\n",
+            .{ v.path, v.line },
+        ) catch continue;
+        stderr.writeAll(msg) catch {};
+    }
+    for ([_][]const BannedPatternViolation{ debug_print_violations, time_violations }) |group| {
+        for (group) |v| {
+            const msg = std.fmt.bufPrint(&buf, "{s}:{d}: banned pattern {s} in src/\n", .{
+                v.path, v.line, v.pattern,
+            }) catch continue;
+            stderr.writeAll(msg) catch {};
+        }
+    }
+    for (wire_violations) |v| {
+        const msg = std.fmt.bufPrint(&buf, "{s}:{d}: usize field in wire struct {s}\n", .{
+            v.path, v.line, v.type_name,
+        }) catch continue;
+        stderr.writeAll(msg) catch {};
+    }
+    if (missing_header) {
+        const msg = std.fmt.bufPrint(&buf, "{s}: missing a //! module header on line 1\n", .{
+            path,
+        }) catch "";
+        stderr.writeAll(msg) catch {};
+    }
+
+    return catch_violations.len > 0 or debug_print_violations.len > 0 or
+        time_violations.len > 0 or wire_violations.len > 0 or missing_header;
+}
+
 /// Checks one file under `src_dir` and reports its violations. Returns whether it had any.
 fn checkFile(
     gpa: Allocator,
@@ -295,16 +547,47 @@ fn checkFile(
 
     const line_violations = try checkLineLengths(gpa, path, source);
     defer gpa.free(line_violations);
-
     const fn_violations = try checkFunctionLengths(gpa, path, source, baseline);
     defer gpa.free(fn_violations);
+    const size_bad = reportSizeViolations(path, line_violations, fn_violations);
 
-    return reportViolations(path, line_violations, fn_violations);
+    const catch_violations = try checkCatchUnreachable(gpa, path, source);
+    defer gpa.free(catch_violations);
+    const debug_print_violations = try checkBannedPattern(gpa, path, source, "std.debug.print");
+    defer gpa.free(debug_print_violations);
+    const time_violations = try checkBannedPattern(gpa, path, source, "std.time.");
+    defer gpa.free(time_violations);
+    const wire_violations = try checkWireUsize(gpa, path, source);
+    defer gpa.free(wire_violations);
+    const missing_header = !hasModuleHeader(source);
+    const ban_bad = reportBanViolations(
+        path,
+        catch_violations,
+        debug_print_violations,
+        time_violations,
+        wire_violations,
+        missing_header,
+    );
+
+    return size_bad or ban_bad;
 }
 
-/// Walks `src/` for `*.zig` files, checks each against `line_length_max` and
-/// `function_lines_max` (excused by `tools/tidy_baseline.txt` where present), prints
-/// violations to stderr, and exits non-zero if any file had one.
+/// Checks `build.zig` for a `//!` module header only (its size was already fixed by plan 001
+/// item 2). Returns whether it is missing one.
+fn checkBuildZigHeader(gpa: Allocator) !bool {
+    const source = try std.fs.cwd().readFileAlloc(gpa, "build.zig", file_bytes_max);
+    defer gpa.free(source);
+
+    if (hasModuleHeader(source)) return false;
+    std.fs.File.stderr().writeAll("build.zig: missing a //! module header on line 1\n") catch {};
+    return true;
+}
+
+/// Walks `src/` for `*.zig` files, checks each against `line_length_max`,
+/// `function_lines_max` (excused by `tools/tidy_baseline.txt` where present), and the
+/// semantic ban list (catch unreachable, std.debug.print, std.time.*, usize in wire structs,
+/// missing `//!` headers); also checks `build.zig`'s header. Prints violations to stderr and
+/// exits non-zero if any file had one.
 pub fn main() !void {
     var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa_state.deinit();
@@ -322,7 +605,7 @@ pub fn main() !void {
     var walker = try src_dir.walk(gpa);
     defer walker.deinit();
 
-    var had_violation = false;
+    var had_violation = try checkBuildZigHeader(gpa);
     var files_seen: u32 = 0;
     while (try walker.next()) |entry| {
         assert(files_seen <= files_max);
@@ -667,4 +950,169 @@ test "tidy: checkFunctionLengths reports the correct name and line_start among t
     try testing.expectEqualStrings("second_long", violations[0].name);
     try testing.expectEqual(@as(u32, 3), violations[0].line_start);
     try testing.expectEqual(@as(u32, 71), violations[0].lines);
+}
+
+// -- checkCatchUnreachable -----------------------------------------------------------------
+
+test "tidy: checkCatchUnreachable flags a bare catch unreachable" {
+    const source = "const x = f() catch unreachable;\n";
+    const violations = try checkCatchUnreachable(testing.allocator, "src/example.zig", source);
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 1), violations.len);
+    try testing.expectEqual(@as(u32, 1), violations[0].line);
+}
+
+test "tidy: checkCatchUnreachable accepts a proof comment on the same line" {
+    const source = "const x = f() catch unreachable; // proof: f never fails here\n";
+    const violations = try checkCatchUnreachable(testing.allocator, "src/example.zig", source);
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 0), violations.len);
+}
+
+test "tidy: checkCatchUnreachable accepts a proof comment on the previous line" {
+    const source = "// proof: f never fails here\nconst x = f() catch unreachable;\n";
+    const violations = try checkCatchUnreachable(testing.allocator, "src/example.zig", source);
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 0), violations.len);
+}
+
+test "tidy: checkCatchUnreachable rejects a proof comment two lines before" {
+    const source = "// proof: f never fails here\n\nconst x = f() catch unreachable;\n";
+    const violations = try checkCatchUnreachable(testing.allocator, "src/example.zig", source);
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 1), violations.len);
+    try testing.expectEqual(@as(u32, 3), violations[0].line);
+}
+
+test "tidy: checkCatchUnreachable flags each offending line independently" {
+    const source = "a() catch unreachable;\nb() catch unreachable; // proof: b is total\n";
+    const violations = try checkCatchUnreachable(testing.allocator, "src/example.zig", source);
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 1), violations.len);
+    try testing.expectEqual(@as(u32, 1), violations[0].line);
+}
+
+// -- checkBannedPattern ---------------------------------------------------------------------
+
+test "tidy: checkBannedPattern flags std.debug.print" {
+    const source = "std.debug.print(\"x\", .{});\n";
+    const violations = try checkBannedPattern(
+        testing.allocator,
+        "src/example.zig",
+        source,
+        "std.debug.print",
+    );
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 1), violations.len);
+    try testing.expectEqual(@as(u32, 1), violations[0].line);
+    try testing.expectEqualStrings("std.debug.print", violations[0].pattern);
+}
+
+test "tidy: checkBannedPattern flags std.time usage" {
+    const source = "const now = std.time.milliTimestamp();\n";
+    const violations = try checkBannedPattern(
+        testing.allocator,
+        "src/example.zig",
+        source,
+        "std.time.",
+    );
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 1), violations.len);
+}
+
+test "tidy: checkBannedPattern returns empty slice when the pattern is absent" {
+    const source = "const x = 1;\nconst y = 2;\n";
+    const violations = try checkBannedPattern(
+        testing.allocator,
+        "src/example.zig",
+        source,
+        "std.debug.print",
+    );
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 0), violations.len);
+}
+
+// -- checkWireUsize --------------------------------------------------------------------------
+
+test "tidy: checkWireUsize flags a usize field inside a wire struct" {
+    const source =
+        \\pub const Entry = struct {
+        \\    index: usize,
+        \\    term: u64,
+        \\};
+        \\
+    ;
+    const violations = try checkWireUsize(testing.allocator, "src/types.zig", source);
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 1), violations.len);
+    try testing.expectEqual(@as(u32, 2), violations[0].line);
+    try testing.expectEqualStrings("Entry", violations[0].type_name);
+}
+
+test "tidy: checkWireUsize accepts an all-u64 wire struct" {
+    const source =
+        \\pub const HardState = struct {
+        \\    term: u64,
+        \\    voted_for: u64,
+        \\};
+        \\
+    ;
+    const violations = try checkWireUsize(testing.allocator, "src/types.zig", source);
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 0), violations.len);
+}
+
+test "tidy: checkWireUsize ignores usize fields outside the named wire structs" {
+    const source =
+        \\pub const Scratch = struct {
+        \\    len: usize,
+        \\};
+        \\
+    ;
+    const violations = try checkWireUsize(testing.allocator, "src/types.zig", source);
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 0), violations.len);
+}
+
+test "tidy: checkWireUsize flags a usize field inside a wire union" {
+    const source =
+        \\pub const Message = union(enum) {
+        \\    vote: struct { count: usize },
+        \\};
+        \\
+    ;
+    const violations = try checkWireUsize(testing.allocator, "src/types.zig", source);
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 1), violations.len);
+    try testing.expectEqualStrings("Message", violations[0].type_name);
+}
+
+test "tidy: checkWireUsize does not match a name that is a substring of another identifier" {
+    const source =
+        \\pub const EntrySet = struct {
+        \\    count: usize,
+        \\};
+        \\
+    ;
+    const violations = try checkWireUsize(testing.allocator, "src/types.zig", source);
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 0), violations.len);
+}
+
+// -- hasModuleHeader -------------------------------------------------------------------------
+
+test "tidy: hasModuleHeader accepts a file starting with //!" {
+    try testing.expect(hasModuleHeader("//! module doc\nconst x = 1;\n"));
+}
+
+test "tidy: hasModuleHeader rejects a file with no header" {
+    try testing.expect(!hasModuleHeader("const x = 1;\n"));
+}
+
+test "tidy: hasModuleHeader rejects a file whose first line is a regular comment" {
+    try testing.expect(!hasModuleHeader("// not a module header\nconst x = 1;\n"));
+}
+
+test "tidy: hasModuleHeader rejects an empty file" {
+    try testing.expect(!hasModuleHeader(""));
 }

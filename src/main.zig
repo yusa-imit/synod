@@ -1,8 +1,9 @@
+//! Minimal CLI: `synod version` / `synod --help`.
+//! Diagnostic subcommands are added as modules land (see docs/PRD.md).
+
 const std = @import("std");
 const synod = @import("synod");
 
-/// Minimal CLI: `synod version` / `synod --help`.
-/// Diagnostic subcommands are added as modules land (see docs/PRD.md).
 pub fn main() !void {
     var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa_state.deinit();
