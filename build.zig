@@ -1,13 +1,14 @@
+//! Build graph for synod — The council where nodes reach consensus — Raft, membership, and
+//! failure detection for Zig.
+//!
+//! Steps:
+//!   zig build            — build library + CLI
+//!   zig build test       — run all unit tests
+//!   zig build bench      — run benchmarks (ReleaseFast recommended)
+//!   zig build docs       — generate API docs into zig-out/docs
+
 const std = @import("std");
 
-/// Build graph for synod — The council where nodes reach consensus — Raft, membership, and
-/// failure detection for Zig.
-///
-/// Steps:
-///   zig build            — build library + CLI
-///   zig build test       — run all unit tests
-///   zig build bench      — run benchmarks (ReleaseFast recommended)
-///   zig build docs       — generate API docs into zig-out/docs
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -60,6 +61,10 @@ pub fn build(b: *std.Build) void {
     const tidy_step = b.step("tidy", "Check line length and function length limits");
     tidy_step.dependOn(&run_tidy.step);
     test_step.dependOn(&run_tidy.step);
+
+    const tidy_tests = b.addTest(.{ .root_module = tidy_exe.root_module });
+    const run_tidy_tests = b.addRunArtifact(tidy_tests);
+    test_step.dependOn(&run_tidy_tests.step);
 
     // Benchmarks
     const bench = b.addExecutable(.{
