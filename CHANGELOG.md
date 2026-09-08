@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `minimum_zig_version` bumped to `0.16.0`; CI resolves the toolchain from `build.zig.zon`
+  instead of pinning `0.15.2` in `mlugg/setup-zig@v2`.
+- `src/main.zig` migrated to the 0.16 entry-point shape: `pub fn main(init: std.process.Init)
+  !void`, `init.gpa`, `init.minimal.args.toSlice(arena)`, `std.Io.File.stdout().writer(init.io,
+  ...)`.
+- `tools/tidy.zig` migrated to 0.16: `std.fs.Dir`/`std.fs.File` → `std.Io.Dir`/`std.Io.File`
+  with `io: Io` threaded through every file-touching function, `GeneralPurposeAllocator` →
+  `DebugAllocator`, `mem.trimLeft` → `mem.trimStart`.
+
 ### Fixed
 
 - CI `paths-ignore` no longer references the removed `.claude/memory/**` path.
