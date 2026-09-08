@@ -2,22 +2,22 @@
 //! Diagnostic subcommands are added as modules land (see docs/PRD.md).
 
 const std = @import("std");
+const Io = std.Io;
+const assert = std.debug.assert;
 const synod = @import("synod");
 
-pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const gpa = gpa_state.allocator();
-
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
+pub fn main(init: std.process.Init) !void {
+    const arena = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(arena);
+    assert(args.len >= 1);
 
     var stdout_buffer: [512]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = Io.File.stdout().writer(init.io, &stdout_buffer);
     const out = &stdout_writer.interface;
     defer out.flush() catch {};
 
     const cmd = if (args.len > 1) args[1] else "--help";
+    assert(cmd.len > 0);
     if (std.mem.eql(u8, cmd, "version")) {
         try out.print("synod {f}\n", .{synod.version});
     } else {

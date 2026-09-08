@@ -26,6 +26,7 @@ const std = @import("std");
 const testing = std.testing;
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 pub const line_length_max: usize = 100;
 pub const function_lines_max: usize = 70;
@@ -162,7 +163,7 @@ pub fn checkFunctionLengths(
     while (offset <= source.len) {
         const line_end = std.mem.indexOfScalarPos(u8, source, offset, '\n') orelse source.len;
         const line = source[offset..line_end];
-        const trimmed = std.mem.trimLeft(u8, line, " \t");
+        const trimmed = std.mem.trimStart(u8, line, " \t");
         if (functionNameAt(trimmed)) |name| {
             if (findFunctionEnd(source, offset, line_number)) |end| {
                 const lines_count = end.line - line_number + 1;
@@ -360,9 +361,9 @@ fn findWireDeclEnd(source: []const u8, from: usize, name: []const u8) ?usize {
         const after_ok = at + name.len < source.len and !isIdentChar(source[at + name.len]);
         if (!before_ok or !after_ok) continue;
 
-        const after_name = std.mem.trimLeft(u8, source[at + name.len ..], " \t\r\n");
+        const after_name = std.mem.trimStart(u8, source[at + name.len ..], " \t\r\n");
         if (!std.mem.startsWith(u8, after_name, "=")) continue;
-        const after_eq = std.mem.trimLeft(u8, after_name[1..], " \t\r\n");
+        const after_eq = std.mem.trimStart(u8, after_name[1..], " \t\r\n");
         const is_struct = std.mem.startsWith(u8, after_eq, "struct");
         const is_union = std.mem.startsWith(u8, after_eq, "union");
         if (!is_struct and !is_union) continue;
@@ -445,10 +446,11 @@ pub fn hasModuleHeader(source: []const u8) bool {
 
 /// Reads `sub_path` under `dir` and returns its contents, or an empty slice if the file does
 /// not exist. Precondition: `gpa` outlives the returned slice; the caller frees it.
-fn readOptionalFile(gpa: Allocator, dir: std.fs.Dir, sub_path: []const u8) ![]u8 {
+fn readOptionalFile(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) ![]u8 {
     assert(sub_path.len > 0);
 
-    const contents = dir.readFileAlloc(gpa, sub_path, file_bytes_max) catch |err| switch (err) {
+    const limit: Io.Limit = .limited(file_bytes_max);
+    const contents = dir.readFileAlloc(io, sub_path, gpa, limit) catch |err| switch (err) {
         error.FileNotFound => return try gpa.alloc(u8, 0),
         else => return err,
     };
@@ -460,25 +462,26 @@ fn readOptionalFile(gpa: Allocator, dir: std.fs.Dir, sub_path: []const u8) ![]u8
 /// Prints every size violation (line-length, function-length) to stderr. Returns whether any
 /// was printed.
 fn reportSizeViolations(
+    io: Io,
     path: []const u8,
     line_violations: []const LineViolation,
     fn_violations: []const FunctionViolation,
 ) bool {
     assert(path.len > 0);
 
-    const stderr = std.fs.File.stderr();
+    const stderr = Io.File.stderr();
     var buf: [512]u8 = undefined;
     for (line_violations) |v| {
         const msg = std.fmt.bufPrint(&buf, "{s}:{d}: line too long ({d} > {d})\n", .{
             v.path, v.line, v.length, line_length_max,
         }) catch continue;
-        stderr.writeAll(msg) catch {};
+        stderr.writeStreamingAll(io, msg) catch {};
     }
     for (fn_violations) |v| {
         const msg = std.fmt.bufPrint(&buf, "{s}:{d}: fn {s} too long ({d} > {d})\n", .{
             v.path, v.line_start, v.name, v.lines, function_lines_max,
         }) catch continue;
-        stderr.writeAll(msg) catch {};
+        stderr.writeStreamingAll(io, msg) catch {};
     }
 
     return line_violations.len > 0 or fn_violations.len > 0;
@@ -487,6 +490,7 @@ fn reportSizeViolations(
 /// Prints every ban-list violation (catch unreachable, banned pattern, wire usize, missing
 /// module header) to stderr. Returns whether any was printed.
 fn reportBanViolations(
+    io: Io,
     path: []const u8,
     catch_violations: []const CatchUnreachableViolation,
     debug_print_violations: []const BannedPatternViolation,
@@ -496,7 +500,7 @@ fn reportBanViolations(
 ) bool {
     assert(path.len > 0);
 
-    const stderr = std.fs.File.stderr();
+    const stderr = Io.File.stderr();
     var buf: [512]u8 = undefined;
     for (catch_violations) |v| {
         const msg = std.fmt.bufPrint(
@@ -504,27 +508,27 @@ fn reportBanViolations(
             "{s}:{d}: catch unreachable without a // proof: comment\n",
             .{ v.path, v.line },
         ) catch continue;
-        stderr.writeAll(msg) catch {};
+        stderr.writeStreamingAll(io, msg) catch {};
     }
     for ([_][]const BannedPatternViolation{ debug_print_violations, time_violations }) |group| {
         for (group) |v| {
             const msg = std.fmt.bufPrint(&buf, "{s}:{d}: banned pattern {s} in src/\n", .{
                 v.path, v.line, v.pattern,
             }) catch continue;
-            stderr.writeAll(msg) catch {};
+            stderr.writeStreamingAll(io, msg) catch {};
         }
     }
     for (wire_violations) |v| {
         const msg = std.fmt.bufPrint(&buf, "{s}:{d}: usize field in wire struct {s}\n", .{
             v.path, v.line, v.type_name,
         }) catch continue;
-        stderr.writeAll(msg) catch {};
+        stderr.writeStreamingAll(io, msg) catch {};
     }
     if (missing_header) {
         const msg = std.fmt.bufPrint(&buf, "{s}: missing a //! module header on line 1\n", .{
             path,
         }) catch "";
-        stderr.writeAll(msg) catch {};
+        stderr.writeStreamingAll(io, msg) catch {};
     }
 
     return catch_violations.len > 0 or debug_print_violations.len > 0 or
@@ -534,7 +538,8 @@ fn reportBanViolations(
 /// Checks one file under `src_dir` and reports its violations. Returns whether it had any.
 fn checkFile(
     gpa: Allocator,
-    src_dir: std.fs.Dir,
+    io: Io,
+    src_dir: Io.Dir,
     rel_path: []const u8,
     path: []const u8,
     baseline: []const BaselineEntry,
@@ -542,14 +547,14 @@ fn checkFile(
     assert(rel_path.len > 0);
     assert(path.len > 0);
 
-    const source = try src_dir.readFileAlloc(gpa, rel_path, file_bytes_max);
+    const source = try src_dir.readFileAlloc(io, rel_path, gpa, .limited(file_bytes_max));
     defer gpa.free(source);
 
     const line_violations = try checkLineLengths(gpa, path, source);
     defer gpa.free(line_violations);
     const fn_violations = try checkFunctionLengths(gpa, path, source, baseline);
     defer gpa.free(fn_violations);
-    const size_bad = reportSizeViolations(path, line_violations, fn_violations);
+    const size_bad = reportSizeViolations(io, path, line_violations, fn_violations);
 
     const catch_violations = try checkCatchUnreachable(gpa, path, source);
     defer gpa.free(catch_violations);
@@ -561,6 +566,7 @@ fn checkFile(
     defer gpa.free(wire_violations);
     const missing_header = !hasModuleHeader(source);
     const ban_bad = reportBanViolations(
+        io,
         path,
         catch_violations,
         debug_print_violations,
@@ -574,12 +580,13 @@ fn checkFile(
 
 /// Checks `build.zig` for a `//!` module header only (its size was already fixed by plan 001
 /// item 2). Returns whether it is missing one.
-fn checkBuildZigHeader(gpa: Allocator) !bool {
-    const source = try std.fs.cwd().readFileAlloc(gpa, "build.zig", file_bytes_max);
+fn checkBuildZigHeader(gpa: Allocator, io: Io) !bool {
+    const source = try Io.Dir.cwd().readFileAlloc(io, "build.zig", gpa, .limited(file_bytes_max));
     defer gpa.free(source);
 
     if (hasModuleHeader(source)) return false;
-    std.fs.File.stderr().writeAll("build.zig: missing a //! module header on line 1\n") catch {};
+    const msg = "build.zig: missing a //! module header on line 1\n";
+    Io.File.stderr().writeStreamingAll(io, msg) catch {};
     return true;
 }
 
@@ -588,26 +595,25 @@ fn checkBuildZigHeader(gpa: Allocator) !bool {
 /// semantic ban list (catch unreachable, std.debug.print, std.time.*, usize in wire structs,
 /// missing `//!` headers); also checks `build.zig`'s header. Prints violations to stderr and
 /// exits non-zero if any file had one.
-pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const gpa = gpa_state.allocator();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
 
-    const baseline_text = try readOptionalFile(gpa, std.fs.cwd(), "tools/tidy_baseline.txt");
+    const baseline_text = try readOptionalFile(gpa, io, Io.Dir.cwd(), "tools/tidy_baseline.txt");
     defer gpa.free(baseline_text);
 
     const baseline = try parseBaseline(gpa, baseline_text);
     defer gpa.free(baseline);
 
-    var src_dir = try std.fs.cwd().openDir("src", .{ .iterate = true });
-    defer src_dir.close();
+    var src_dir = try Io.Dir.cwd().openDir(io, "src", .{ .iterate = true });
+    defer src_dir.close(io);
 
     var walker = try src_dir.walk(gpa);
     defer walker.deinit();
 
-    var had_violation = try checkBuildZigHeader(gpa);
+    var had_violation = try checkBuildZigHeader(gpa, io);
     var files_seen: u32 = 0;
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         assert(files_seen <= files_max);
         files_seen += 1;
         if (files_seen == files_max) return error.TooManyFiles;
@@ -617,7 +623,7 @@ pub fn main() !void {
         const path = try std.fmt.allocPrint(gpa, "src/{s}", .{entry.path});
         defer gpa.free(path);
 
-        if (try checkFile(gpa, src_dir, entry.path, path, baseline)) had_violation = true;
+        if (try checkFile(gpa, io, src_dir, entry.path, path, baseline)) had_violation = true;
     }
 
     if (had_violation) std.process.exit(1);
