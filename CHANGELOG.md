@@ -21,6 +21,9 @@ All notable changes to this project are documented in this file. Format follows
 - CI `paths-ignore` no longer references the removed `.claude/memory/**` path.
 - `src/root.zig` and `bench/main.zig` doc comments point at `docs/plans/000-inherited.md`
   instead of the renamed `docs/milestones.md`.
+- `tools/tidy.zig`'s `hasModuleHeader` rewrote a compound `assert(!a or b)` implication as the
+  Tiger-Style-preferred `if (a) assert(b);` form (rule: split compound assertions and
+  conditions) — no behavior change.
 
 ### Added
 

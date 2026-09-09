@@ -440,7 +440,7 @@ pub fn hasModuleHeader(source: []const u8) bool {
     assert(first_line_end <= source.len);
     const first_line = source[0..first_line_end];
     const has_header = std.mem.startsWith(u8, first_line, "//!");
-    assert(!has_header or first_line.len >= 3);
+    if (has_header) assert(first_line.len >= 3);
     return has_header;
 }
 
