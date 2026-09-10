@@ -12,6 +12,13 @@ All notable changes to this project are documented in this file. Format follows
 - `src/main.zig` migrated to the 0.16 entry-point shape: `pub fn main(init: std.process.Init)
   !void`, `init.gpa`, `init.minimal.args.toSlice(arena)`, `std.Io.File.stdout().writer(init.io,
   ...)`.
+- `bench/main.zig` migrated to 0.16: `pub fn main(init: std.process.Init) !void`, `init.gpa`,
+  `Io.Clock.Timestamp.now(init.io, .awake)`/`.untilNow(init.io)` replacing `std.time.Timer`, and
+  the benchmark name filter extracted into a pure, unit-tested `matchesFilter` using
+  `std.mem.find` instead of the removed `std.mem.indexOf`.
+- CI gained a "Bench (compile + smoke run)" step (`zig build bench -- __ci_no_match__`) so the
+  bench executable — previously unreachable from CI, since `zig build`'s default step never
+  installs it — is actually built and its `main()` run on every push.
 - `tools/tidy.zig` migrated to 0.16: `std.fs.Dir`/`std.fs.File` → `std.Io.Dir`/`std.Io.File`
   with `io: Io` threaded through every file-touching function, `GeneralPurposeAllocator` →
   `DebugAllocator`, `mem.trimLeft` → `mem.trimStart`.
