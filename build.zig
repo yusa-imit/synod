@@ -83,6 +83,10 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_bench.step);
 
+    const bench_tests = b.addTest(.{ .root_module = bench.root_module });
+    const run_bench_tests = b.addRunArtifact(bench_tests);
+    test_step.dependOn(&run_bench_tests.step);
+
     // Docs
     const docs = b.addInstallDirectory(.{
         .source_dir = mod_tests.getEmittedDocs(),
