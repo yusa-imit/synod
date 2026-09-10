@@ -22,6 +22,10 @@ All notable changes to this project are documented in this file. Format follows
 - `tools/tidy.zig` migrated to 0.16: `std.fs.Dir`/`std.fs.File` → `std.Io.Dir`/`std.Io.File`
   with `io: Io` threaded through every file-touching function, `GeneralPurposeAllocator` →
   `DebugAllocator`, `mem.trimLeft` → `mem.trimStart`.
+- 0.16 library-core sweep confirmed: `src/` has zero hits for every remaining 0.15-only pattern
+  (`= .{}` list literals, `indexOf*`, `fs.cwd`, `std.net`, `Thread.*`, `std.once`, `@Type`,
+  `else => unreachable` over I/O errors, `std.time`) — no code change, `zig test src/root.zig`
+  stays 12/12 green.
 
 ### Fixed
 
