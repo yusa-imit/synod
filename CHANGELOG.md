@@ -49,3 +49,10 @@ All notable changes to this project are documented in this file. Format follows
   a `usize` field inside a wire/format struct (`Message`, `Entry`, `HardState`, `Snapshot`),
   and any `.zig` file missing a `//!` module header. `build.zig` and `src/main.zig` gained the
   headers they lacked.
+- `docs/adr/0002-io-at-the-boundary.md` recording the `io: Io`-at-the-boundary rule: `io: Io`
+  is the first parameter after the receiver on `src/driver.zig`/`src/adapters.zig` and the
+  CLI/bench entry points, while `src/raft.zig`, `src/membership.zig`, `src/detector.zig`,
+  `src/clock.zig`, and `src/log.zig` never reference `std.Io` and keep the injected
+  `Clock`/`Rng` vtables instead. `tools/tidy.zig` gained a matching `core_purity_files`/
+  `isCorePurityFile` check so `zig build tidy` fails on a `std.Io` hit in any of those five
+  files.
