@@ -56,3 +56,9 @@ All notable changes to this project are documented in this file. Format follows
   `Clock`/`Rng` vtables instead. `tools/tidy.zig` gained a matching `core_purity_files`/
   `isCorePurityFile` check so `zig build tidy` fails on a `std.Io` hit in any of those five
   files.
+- `docs/adr/0003-assertion-baseline.md` recording the assertion-baseline contract: `src/main.zig`
+  and `bench/main.zig` (the only real code today) keep their existing preconditions/postconditions
+  from prior review cycles (`grep -c assert` gives 3 and 6); `src/types.zig`, `src/interfaces.zig`,
+  `src/log.zig`, and `src/store.zig` (the next modules per `REALM.md`'s build order) must assert
+  preconditions on entry and invariants on exit on every `pub fn` once real logic lands, with
+  `log.validate()` run at the end of every test that mutates the log.
