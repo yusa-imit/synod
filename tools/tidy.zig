@@ -17,10 +17,10 @@
 //! dependency-free; a false positive is cheap to silence at the call site (reword the line).
 //!
 //! `main()` walks `src/` recursively, checks every `*.zig` file against the size rules, the
-//! ban list (`catch unreachable` without `// proof:`, `std.debug.print`, `std.time.*`, `usize`
-//! in a wire struct, a missing `//!` header), loading `tools/tidy_baseline.txt` when present,
-//! also checks `build.zig`'s header, prints violations to stderr, and exits non-zero if any
-//! file had one.
+//! ban list (`catch unreachable` without `// proof:`, `std.debug.print`, `std.time.*`, `std.Io`
+//! in core-purity files, `usize` in a wire struct, a missing `//!` header), loading
+//! `tools/tidy_baseline.txt` when present, also checks `build.zig`'s header, prints violations
+//! to stderr, and exits non-zero if any file had one.
 
 const std = @import("std");
 const testing = std.testing;
@@ -267,6 +267,28 @@ pub const WireUsizeViolation = struct {
 /// cross-compile targets, so it may never appear inside these on-wire types.
 pub const wire_struct_names = [_][]const u8{ "Message", "Entry", "HardState", "Snapshot" };
 
+/// Core-purity files (`docs/adr/0002-io-at-the-boundary.md`): `std.Io` never appears in these
+/// — they take the injected `Clock`/`Rng` vtables from `src/interfaces.zig` instead, so
+/// `src/sim.zig` can drive them deterministically. `src/main.zig`, `bench/main.zig`,
+/// `src/driver.zig`, and `src/adapters.zig` are the `std.Io` boundary and are deliberately
+/// excluded.
+pub const core_purity_files = [_][]const u8{
+    "src/raft.zig",  "src/membership.zig", "src/detector.zig",
+    "src/clock.zig", "src/log.zig",
+};
+
+/// True if `path` is one of the exact `core_purity_files` paths (a whole-path match, not a
+/// suffix or substring match — `src/sub/raft.zig` and `raft.zig` are both `false`).
+pub fn isCorePurityFile(path: []const u8) bool {
+    assert(path.len > 0);
+    comptime assert(core_purity_files.len == 5);
+
+    for (core_purity_files) |core_path| {
+        if (std.mem.eql(u8, path, core_path)) return true;
+    }
+    return false;
+}
+
 /// Precondition: `path` and `source` outlive the returned slice.
 /// Postcondition: one `CatchUnreachableViolation` per line containing `catch unreachable`
 /// that has no `// proof:` comment on that same line or on the line immediately before it.
@@ -487,14 +509,15 @@ fn reportSizeViolations(
     return line_violations.len > 0 or fn_violations.len > 0;
 }
 
-/// Prints every ban-list violation (catch unreachable, banned pattern, wire usize, missing
-/// module header) to stderr. Returns whether any was printed.
+/// Prints every ban-list violation (catch unreachable, banned pattern, `std.Io` core-purity,
+/// wire usize, missing module header) to stderr. Returns whether any was printed.
 fn reportBanViolations(
     io: Io,
     path: []const u8,
     catch_violations: []const CatchUnreachableViolation,
     debug_print_violations: []const BannedPatternViolation,
     time_violations: []const BannedPatternViolation,
+    io_violations: []const BannedPatternViolation,
     wire_violations: []const WireUsizeViolation,
     missing_header: bool,
 ) bool {
@@ -510,7 +533,10 @@ fn reportBanViolations(
         ) catch continue;
         stderr.writeStreamingAll(io, msg) catch {};
     }
-    for ([_][]const BannedPatternViolation{ debug_print_violations, time_violations }) |group| {
+    const banned_pattern_groups = [_][]const BannedPatternViolation{
+        debug_print_violations, time_violations, io_violations,
+    };
+    for (banned_pattern_groups) |group| {
         for (group) |v| {
             const msg = std.fmt.bufPrint(&buf, "{s}:{d}: banned pattern {s} in src/\n", .{
                 v.path, v.line, v.pattern,
@@ -532,10 +558,13 @@ fn reportBanViolations(
     }
 
     return catch_violations.len > 0 or debug_print_violations.len > 0 or
-        time_violations.len > 0 or wire_violations.len > 0 or missing_header;
+        time_violations.len > 0 or io_violations.len > 0 or
+        wire_violations.len > 0 or missing_header;
 }
 
-/// Checks one file under `src_dir` and reports its violations. Returns whether it had any.
+/// Checks one file under `src_dir` against the size rules and the ban list (catch unreachable,
+/// std.debug.print, std.time.*, std.Io in core-purity files, usize in wire structs, missing
+/// `//!` header) and reports its violations. Returns whether it had any.
 fn checkFile(
     gpa: Allocator,
     io: Io,
@@ -562,6 +591,19 @@ fn checkFile(
     defer gpa.free(debug_print_violations);
     const time_violations = try checkBannedPattern(gpa, path, source, "std.time.");
     defer gpa.free(time_violations);
+    // ADR-002: `std.Io` is only banned inside the five core-purity files, so the check itself
+    // (and the allocation it makes) is conditional. `checkBannedPattern` always allocates via
+    // `toOwnedSlice`, even for zero violations, so the exempt-file branch uses a compile-time
+    // empty slice instead of calling it — and the matching `gpa.free` below is gated on the
+    // same `is_core_purity_file` so it never frees a slice `gpa` did not allocate.
+    const is_core_purity_file = isCorePurityFile(path);
+    const io_purity_violations = if (is_core_purity_file)
+        try checkBannedPattern(gpa, path, source, "std.Io")
+    else
+        &[_]BannedPatternViolation{};
+    defer if (is_core_purity_file) gpa.free(io_purity_violations);
+    assert(is_core_purity_file or io_purity_violations.len == 0);
+
     const wire_violations = try checkWireUsize(gpa, path, source);
     defer gpa.free(wire_violations);
     const missing_header = !hasModuleHeader(source);
@@ -571,6 +613,7 @@ fn checkFile(
         catch_violations,
         debug_print_violations,
         time_violations,
+        io_purity_violations,
         wire_violations,
         missing_header,
     );
@@ -592,9 +635,9 @@ fn checkBuildZigHeader(gpa: Allocator, io: Io) !bool {
 
 /// Walks `src/` for `*.zig` files, checks each against `line_length_max`,
 /// `function_lines_max` (excused by `tools/tidy_baseline.txt` where present), and the
-/// semantic ban list (catch unreachable, std.debug.print, std.time.*, usize in wire structs,
-/// missing `//!` headers); also checks `build.zig`'s header. Prints violations to stderr and
-/// exits non-zero if any file had one.
+/// semantic ban list (catch unreachable, std.debug.print, std.time.*, std.Io in core-purity
+/// files, usize in wire structs, missing `//!` headers); also checks `build.zig`'s header.
+/// Prints violations to stderr and exits non-zero if any file had one.
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -1036,6 +1079,105 @@ test "tidy: checkBannedPattern returns empty slice when the pattern is absent" {
     );
     defer testing.allocator.free(violations);
     try testing.expectEqual(@as(usize, 0), violations.len);
+}
+
+// -- std.Io core purity (ADR-002) -----------------------------------------------------------
+//
+// `docs/adr/0002-io-at-the-boundary.md` bans the substring `std.Io` in exactly five
+// core-purity files, not across all of `src/` the way `std.debug.print`/`std.time.` are
+// banned uniformly by `checkFile()`. This is a *file-scoped* check, following the
+// `wire_struct_names` precedent (a comptime list consulted by a check function) rather than a
+// bare `checkBannedPattern` call applied to every file — see `core_purity_files` and
+// `isCorePurityFile` above, and their wiring into `checkFile()`'s `io_purity_violations`.
+
+test "tidy: isCorePurityFile is true for exactly the five ADR-002 core-purity files" {
+    const core_files = [_][]const u8{
+        "src/raft.zig",
+        "src/membership.zig",
+        "src/detector.zig",
+        "src/clock.zig",
+        "src/log.zig",
+    };
+    try testing.expectEqual(@as(usize, 5), core_purity_files.len);
+    for (core_files) |path| {
+        try testing.expect(isCorePurityFile(path));
+    }
+}
+
+test "tidy: isCorePurityFile excludes the std.Io-boundary files main/bench/driver/adapters" {
+    try testing.expect(!isCorePurityFile("src/main.zig"));
+    try testing.expect(!isCorePurityFile("bench/main.zig"));
+    try testing.expect(!isCorePurityFile("src/driver.zig"));
+    try testing.expect(!isCorePurityFile("src/adapters.zig"));
+}
+
+test "tidy: isCorePurityFile rejects a path that merely ends with a core-purity file name" {
+    // Whole-path match only — a nested or differently-rooted path must not false-positive.
+    try testing.expect(!isCorePurityFile("src/sub/raft.zig"));
+    try testing.expect(!isCorePurityFile("raft.zig"));
+}
+
+test "tidy: checkBannedPattern flags std.Io in a src/raft.zig-shaped fixture" {
+    const source =
+        \\const std = @import("std");
+        \\
+        \\pub fn step(io: std.Io) void {
+        \\    _ = io;
+        \\}
+        \\
+    ;
+    const violations = try checkBannedPattern(testing.allocator, "src/raft.zig", source, "std.Io");
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 1), violations.len);
+    try testing.expectEqual(@as(u32, 3), violations[0].line);
+    try testing.expectEqualStrings("std.Io", violations[0].pattern);
+}
+
+test "tidy: checkBannedPattern flags std.Io in each ADR-002 core-purity file" {
+    const core_files = [_][]const u8{
+        "src/raft.zig",
+        "src/membership.zig",
+        "src/detector.zig",
+        "src/clock.zig",
+        "src/log.zig",
+    };
+    const source = "const x = std.Io.Dir.cwd();\n";
+    for (core_files) |path| {
+        try testing.expect(isCorePurityFile(path));
+        const violations = try checkBannedPattern(testing.allocator, path, source, "std.Io");
+        defer testing.allocator.free(violations);
+        try testing.expectEqual(@as(usize, 1), violations.len);
+        try testing.expectEqualStrings(path, violations[0].path);
+        try testing.expectEqualStrings("std.Io", violations[0].pattern);
+    }
+}
+
+test "tidy: checkBannedPattern returns zero std.Io violations for a core-purity file with none" {
+    const source =
+        \\const std = @import("std");
+        \\
+        \\pub fn step(clock: Clock) void {
+        \\    _ = clock;
+        \\}
+        \\
+    ;
+    const violations = try checkBannedPattern(testing.allocator, "src/raft.zig", source, "std.Io");
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 0), violations.len);
+}
+
+test "tidy: a std.Io-boundary file like src/driver.zig is excluded despite containing std.Io" {
+    // The key file-scoping behavior: the same substring that gets flagged in src/raft.zig
+    // must NOT cause src/driver.zig to be treated as a core-purity file.
+    const path = "src/driver.zig";
+    try testing.expect(!isCorePurityFile(path));
+
+    // Sanity: the substring really is present, so a non-scoped check (checkBannedPattern
+    // called unconditionally, as std.debug.print/std.time. are) would have flagged it.
+    const source = "pub fn run(io: std.Io) void {\n    _ = io;\n}\n";
+    const unscoped = try checkBannedPattern(testing.allocator, path, source, "std.Io");
+    defer testing.allocator.free(unscoped);
+    try testing.expectEqual(@as(usize, 1), unscoped.len);
 }
 
 // -- checkWireUsize --------------------------------------------------------------------------
