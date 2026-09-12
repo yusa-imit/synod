@@ -45,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
         assert(elapsed.raw.nanoseconds >= 0);
         const ns: u64 = @intCast(@max(elapsed.raw.nanoseconds, 0));
         const ns_per_op = if (ops == 0) 0 else ns / ops;
-        assert(ops > 0 or ns_per_op == 0);
+        if (ops == 0) assert(ns_per_op == 0);
         const ops_per_s = if (ns == 0) 0 else ops * std.time.ns_per_s / ns;
         try out.print("{s:<32} {d:>12} ops/s {d:>10} ns/op\n", .{ b.name, ops_per_s, ns_per_op });
     }

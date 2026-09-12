@@ -602,7 +602,7 @@ fn checkFile(
     else
         &[_]BannedPatternViolation{};
     defer if (is_core_purity_file) gpa.free(io_purity_violations);
-    assert(is_core_purity_file or io_purity_violations.len == 0);
+    if (!is_core_purity_file) assert(io_purity_violations.len == 0);
 
     const wire_violations = try checkWireUsize(gpa, path, source);
     defer gpa.free(wire_violations);
