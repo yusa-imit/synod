@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-16
+
 ### Changed
 
 - README reconciled with reality: Zig badge `0.15.x` → `0.16.0`; module table gained a
