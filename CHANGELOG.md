@@ -7,6 +7,11 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Changed
 
+- README reconciled with reality: Zig badge `0.15.x` → `0.16.0`; module table gained a
+  `Status` column, every row marked `planned` (nothing is implemented yet); the intro
+  paragraph and `Status` section now say plainly that the repo is a scaffold, not a working
+  library; the install snippet points at the not-yet-tagged `v0.2.0` instead of the
+  never-published `v0.1.0`, with a note that no tag exists until plan 001 item 11 releases it.
 - `minimum_zig_version` bumped to `0.16.0`; CI resolves the toolchain from `build.zig.zon`
   instead of pinning `0.15.2` in `mlugg/setup-zig@v2`.
 - `src/main.zig` migrated to the 0.16 entry-point shape: `pub fn main(init: std.process.Init)
