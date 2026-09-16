@@ -14,12 +14,44 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Public library module — consumers `@import("synod")`
-    const mod = b.addModule("synod", .{
+    const mod = addLibraryModule(b, target);
+
+    // CLI executable (diagnostics, version, small utilities)
+    const exe = addCliExecutable(b, mod, target, optimize);
+    addRunStep(b, exe);
+
+    // Tests
+    const tests = addTestStep(b, mod, exe);
+
+    // Tidy — Tiger Style size-floor checker (line length, function length).
+    addTidyStep(b, tests.step);
+
+    // Benchmarks
+    addBenchStep(b, mod, target, tests.step);
+
+    // Docs
+    addDocsStep(b, tests.mod_tests);
+}
+
+/// Handles `addTestStep` wires up, passed on to the steps hanging off `test`.
+const TestSteps = struct {
+    step: *std.Build.Step,
+    mod_tests: *std.Build.Step.Compile,
+};
+
+fn addLibraryModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    return b.addModule("synod", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+}
 
-    // CLI executable (diagnostics, version, small utilities)
+fn addCliExecutable(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = "synod",
         .root_module = b.createModule(.{
@@ -32,14 +64,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(exe);
+    return exe;
+}
 
+fn addRunStep(b: *std.Build, exe: *std.Build.Step.Compile) void {
     const run_step = b.step("run", "Run the CLI");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
+}
 
-    // Tests
+fn addTestStep(b: *std.Build, mod: *std.Build.Module, exe: *std.Build.Step.Compile) TestSteps {
     const mod_tests = b.addTest(.{ .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
@@ -47,8 +83,10 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    return .{ .step = test_step, .mod_tests = mod_tests };
+}
 
-    // Tidy — Tiger Style size-floor checker (line length, function length).
+fn addTidyStep(b: *std.Build, test_step: *std.Build.Step) void {
     const tidy_exe = b.addExecutable(.{
         .name = "tidy",
         .root_module = b.createModule(.{
@@ -65,8 +103,14 @@ pub fn build(b: *std.Build) void {
     const tidy_tests = b.addTest(.{ .root_module = tidy_exe.root_module });
     const run_tidy_tests = b.addRunArtifact(tidy_tests);
     test_step.dependOn(&run_tidy_tests.step);
+}
 
-    // Benchmarks
+fn addBenchStep(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    test_step: *std.Build.Step,
+) void {
     const bench = b.addExecutable(.{
         .name = "synod-bench",
         .root_module = b.createModule(.{
@@ -86,8 +130,9 @@ pub fn build(b: *std.Build) void {
     const bench_tests = b.addTest(.{ .root_module = bench.root_module });
     const run_bench_tests = b.addRunArtifact(bench_tests);
     test_step.dependOn(&run_bench_tests.step);
+}
 
-    // Docs
+fn addDocsStep(b: *std.Build, mod_tests: *std.Build.Step.Compile) void {
     const docs = b.addInstallDirectory(.{
         .source_dir = mod_tests.getEmittedDocs(),
         .install_dir = .prefix,
