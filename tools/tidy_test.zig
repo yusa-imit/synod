@@ -463,7 +463,12 @@ test "tidy: checkBannedPattern flags std.Io in a src/raft.zig-shaped fixture" {
         \\}
         \\
     ;
-    const violations = try tidy.checkBannedPattern(testing.allocator, "src/raft.zig", source, "std.Io");
+    const violations = try tidy.checkBannedPattern(
+        testing.allocator,
+        "src/raft.zig",
+        source,
+        "std.Io",
+    );
     defer testing.allocator.free(violations);
     try testing.expectEqual(@as(usize, 1), violations.len);
     try testing.expectEqual(@as(u32, 3), violations[0].line);
@@ -498,7 +503,12 @@ test "tidy: checkBannedPattern returns zero std.Io violations for a core-purity 
         \\}
         \\
     ;
-    const violations = try tidy.checkBannedPattern(testing.allocator, "src/raft.zig", source, "std.Io");
+    const violations = try tidy.checkBannedPattern(
+        testing.allocator,
+        "src/raft.zig",
+        source,
+        "std.Io",
+    );
     defer testing.allocator.free(violations);
     try testing.expectEqual(@as(usize, 0), violations.len);
 }
@@ -600,4 +610,172 @@ test "tidy: hasModuleHeader rejects a file whose first line is a regular comment
 
 test "tidy: hasModuleHeader rejects an empty file" {
     try testing.expect(!tidy.hasModuleHeader(""));
+}
+
+// -- checkFileSizeOnly (tools/*.zig + build.zig size-only widening) --------------------------
+//
+// `checkFile()` runs both the size checks and the ban-list checks and is `src/`-only.
+// `checkFileSizeOnly()` widens size-only coverage to `tools/*.zig` and `build.zig` without
+// widening the ban list — `tools/tidy.zig` and `tools/tidy_test.zig` both contain literal
+// ban-list substrings (inside string fixtures/messages) that would false-positive if a
+// substring-scanning ban-list check ever ran over them. These tests build real files under a
+// `std.testing.tmpDir` because, unlike every checker above, `checkFileSizeOnly` reads from an
+// `Io.Dir` rather than taking `source` directly.
+
+test "tidy: checkFileSizeOnly detects a line-too-long violation in a tools/*.zig-shaped file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const long_comment = "// " ++ ("a" ** 150);
+    const source = "//! fixture module\n" ++ long_comment ++ "\nfn f() void {}\n";
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "example.zig", .data = source });
+
+    const had_violation = try tidy.checkFileSizeOnly(
+        testing.allocator,
+        testing.io,
+        tmp.dir,
+        "example.zig",
+        "tools/example.zig",
+        &[_]tidy.BaselineEntry{},
+    );
+    try testing.expect(had_violation);
+}
+
+test "tidy: checkFileSizeOnly detects a function-length violation with no covering baseline" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const fn_source = comptime comptimeFunctionSource("too_long", 71);
+    const source = "//! fixture module\n" ++ fn_source;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "big.zig", .data = source });
+
+    const had_violation = try tidy.checkFileSizeOnly(
+        testing.allocator,
+        testing.io,
+        tmp.dir,
+        "big.zig",
+        "tools/big.zig",
+        &[_]tidy.BaselineEntry{},
+    );
+    try testing.expect(had_violation);
+}
+
+test "tidy: checkFileSizeOnly accepts an over-limit function when a baseline entry covers it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const fn_source = comptime comptimeFunctionSource("covered_by_baseline", 71);
+    const source = "//! fixture module\n" ++ fn_source;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "big.zig", .data = source });
+
+    const baseline = [_]tidy.BaselineEntry{
+        .{ .path = "tools/big.zig", .name = "covered_by_baseline", .lines_max = 71 },
+    };
+    const had_violation = try tidy.checkFileSizeOnly(
+        testing.allocator,
+        testing.io,
+        tmp.dir,
+        "big.zig",
+        "tools/big.zig",
+        &baseline,
+    );
+    try testing.expect(!had_violation);
+}
+
+test "tidy: checkFileSizeOnly detects a missing //! module header" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source = "fn short() void {}\n";
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "no_header.zig", .data = source });
+
+    const had_violation = try tidy.checkFileSizeOnly(
+        testing.allocator,
+        testing.io,
+        tmp.dir,
+        "no_header.zig",
+        "tools/no_header.zig",
+        &[_]tidy.BaselineEntry{},
+    );
+    try testing.expect(had_violation);
+}
+
+test "tidy: checkFileSizeOnly returns false for a clean, small, well-formed file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source = "//! fixture module\nfn short() void {}\n";
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "clean.zig", .data = source });
+
+    const had_violation = try tidy.checkFileSizeOnly(
+        testing.allocator,
+        testing.io,
+        tmp.dir,
+        "clean.zig",
+        "tools/clean.zig",
+        &[_]tidy.BaselineEntry{},
+    );
+    try testing.expect(!had_violation);
+}
+
+test "tidy: checkFileSizeOnly does not flag ban-list-only content that checkFile would reject" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Deliberate trap: a bare `catch unreachable` (no proof comment) and a `std.debug.print`
+    // call, each of which checkFile's ban-list checks would flag on their own — see the
+    // sanity assertions against the pure checkers below. The file stays small, keeps a //!
+    // header, and has no long line or long function, so checkFileSizeOnly (which never runs
+    // the ban-list) must report no violation for it. This is the whole reason
+    // checkFileSizeOnly exists instead of reusing checkFile for tools/*.zig.
+    const source =
+        \\//! fixture module
+        \\const x = f() catch unreachable;
+        \\std.debug.print("hi", .{});
+        \\
+    ;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "ban_trap.zig", .data = source });
+
+    // Sanity: prove the fixture really would trip checkFile's ban-list checks, so a future
+    // no-op implementation of checkFileSizeOnly (e.g. one that always returns false) can't
+    // make this test pass vacuously without the fixture being a real trap.
+    const catch_violations = try tidy.checkCatchUnreachable(
+        testing.allocator,
+        "tools/ban_trap.zig",
+        source,
+    );
+    defer testing.allocator.free(catch_violations);
+    try testing.expect(catch_violations.len > 0);
+    const print_violations = try tidy.checkBannedPattern(
+        testing.allocator,
+        "tools/ban_trap.zig",
+        source,
+        "std.debug.print",
+    );
+    defer testing.allocator.free(print_violations);
+    try testing.expect(print_violations.len > 0);
+
+    const had_violation = try tidy.checkFileSizeOnly(
+        testing.allocator,
+        testing.io,
+        tmp.dir,
+        "ban_trap.zig",
+        "tools/ban_trap.zig",
+        &[_]tidy.BaselineEntry{},
+    );
+    try testing.expect(!had_violation);
+}
+
+test "tidy: checkFileSizeOnly propagates an error for a file that does not exist" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try testing.expectError(error.FileNotFound, tidy.checkFileSizeOnly(
+        testing.allocator,
+        testing.io,
+        tmp.dir,
+        "missing.zig",
+        "tools/missing.zig",
+        &[_]tidy.BaselineEntry{},
+    ));
 }
