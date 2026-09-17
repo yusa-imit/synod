@@ -19,8 +19,12 @@
 //! `main()` walks `src/` recursively, checks every `*.zig` file against the size rules, the
 //! ban list (`catch unreachable` without `// proof:`, `std.debug.print`, `std.time.*`, `std.Io`
 //! in core-purity files, `usize` in a wire struct, a missing `//!` header), loading
-//! `tools/tidy_baseline.txt` when present, also checks `build.zig`'s header, prints violations
-//! to stderr, and exits non-zero if any file had one.
+//! `tools/tidy_baseline.txt` when present. It also walks `tools/*.zig` and checks `build.zig`,
+//! but for those two, the size rules and the missing-header check only — never the ban list:
+//! this file implements the ban list and `tools/tidy_test.zig` exercises it, so both files
+//! contain the banned substrings (e.g. `"catch unreachable"`, `"std.debug.print"`) inside
+//! string literals, which a substring-scanning ban list would false-positive on. Prints
+//! violations to stderr, and exits non-zero if any file had one.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -620,23 +624,54 @@ fn checkFile(
     return size_bad or ban_bad;
 }
 
-/// Checks `build.zig` for a `//!` module header only (its size was already fixed by plan 001
-/// item 2). Returns whether it is missing one.
-fn checkBuildZigHeader(gpa: Allocator, io: Io) !bool {
-    const source = try Io.Dir.cwd().readFileAlloc(io, "build.zig", gpa, .limited(file_bytes_max));
-    defer gpa.free(source);
+/// Checks one file under `dir` against the size rules (line length, function length) and the
+/// `//!` module header only — never the ban list. Used for `tools/*.zig` and `build.zig`,
+/// which are not `src/` core files but still contain literal ban-list substrings in their own
+/// string fixtures/messages (see the file doc comment), so running the ban list over them
+/// would false-positive. Returns whether the file had any violation.
+pub fn checkFileSizeOnly(
+    gpa: Allocator,
+    io: Io,
+    dir: Io.Dir,
+    rel_path: []const u8,
+    path: []const u8,
+    baseline: []const BaselineEntry,
+) !bool {
+    assert(rel_path.len > 0);
+    assert(path.len > 0);
 
-    if (hasModuleHeader(source)) return false;
-    const msg = "build.zig: missing a //! module header on line 1\n";
-    Io.File.stderr().writeStreamingAll(io, msg) catch {};
-    return true;
+    const source = try dir.readFileAlloc(io, rel_path, gpa, .limited(file_bytes_max));
+    defer gpa.free(source);
+    assert(source.len <= file_bytes_max);
+
+    const line_violations = try checkLineLengths(gpa, path, source);
+    defer gpa.free(line_violations);
+    const fn_violations = try checkFunctionLengths(gpa, path, source, baseline);
+    defer gpa.free(fn_violations);
+    const size_bad = reportSizeViolations(io, path, line_violations, fn_violations);
+
+    const missing_header = !hasModuleHeader(source);
+    if (missing_header) {
+        const stderr = Io.File.stderr();
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s}: missing a //! module header on line 1\n", .{
+            path,
+        }) catch "";
+        stderr.writeStreamingAll(io, msg) catch {};
+    }
+
+    return size_bad or missing_header;
 }
 
 /// Walks `src/` for `*.zig` files, checks each against `line_length_max`,
 /// `function_lines_max` (excused by `tools/tidy_baseline.txt` where present), and the
 /// semantic ban list (catch unreachable, std.debug.print, std.time.*, std.Io in core-purity
-/// files, usize in wire structs, missing `//!` headers); also checks `build.zig`'s header.
-/// Prints violations to stderr and exits non-zero if any file had one.
+/// files, usize in wire structs, missing `//!` headers). Also walks `tools/*.zig` and checks
+/// `build.zig`, but for those the size rules and the missing-header check only — never the
+/// ban list, since `tools/tidy.zig` and `tools/tidy_test.zig` deliberately contain the banned
+/// substrings inside their own ban-list implementation and test fixtures, which would
+/// false-positive under a naive substring scan. Prints violations to stderr and exits
+/// non-zero if any file had one.
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -647,15 +682,26 @@ pub fn main(init: std.process.Init) !void {
     const baseline = try parseBaseline(gpa, baseline_text);
     defer gpa.free(baseline);
 
+    var files_seen: u32 = 0;
+    assert(files_seen <= files_max);
+    files_seen += 1;
+    if (files_seen == files_max) return error.TooManyFiles;
+    var had_violation = try checkFileSizeOnly(
+        gpa,
+        io,
+        Io.Dir.cwd(),
+        "build.zig",
+        "build.zig",
+        baseline,
+    );
+
     var src_dir = try Io.Dir.cwd().openDir(io, "src", .{ .iterate = true });
     defer src_dir.close(io);
 
-    var walker = try src_dir.walk(gpa);
-    defer walker.deinit();
+    var src_walker = try src_dir.walk(gpa);
+    defer src_walker.deinit();
 
-    var had_violation = try checkBuildZigHeader(gpa, io);
-    var files_seen: u32 = 0;
-    while (try walker.next(io)) |entry| {
+    while (try src_walker.next(io)) |entry| {
         assert(files_seen <= files_max);
         files_seen += 1;
         if (files_seen == files_max) return error.TooManyFiles;
@@ -666,6 +712,27 @@ pub fn main(init: std.process.Init) !void {
         defer gpa.free(path);
 
         if (try checkFile(gpa, io, src_dir, entry.path, path, baseline)) had_violation = true;
+    }
+
+    var tools_dir = try Io.Dir.cwd().openDir(io, "tools", .{ .iterate = true });
+    defer tools_dir.close(io);
+
+    var tools_walker = try tools_dir.walk(gpa);
+    defer tools_walker.deinit();
+
+    while (try tools_walker.next(io)) |entry| {
+        assert(files_seen <= files_max);
+        files_seen += 1;
+        if (files_seen == files_max) return error.TooManyFiles;
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+
+        const path = try std.fmt.allocPrint(gpa, "tools/{s}", .{entry.path});
+        defer gpa.free(path);
+
+        if (try checkFileSizeOnly(gpa, io, tools_dir, entry.path, path, baseline)) {
+            had_violation = true;
+        }
     }
 
     if (had_violation) std.process.exit(1);
