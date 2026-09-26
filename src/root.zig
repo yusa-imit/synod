@@ -7,8 +7,12 @@
 //! See docs/PRD.md for the full design and docs/plans/000-inherited.md for progress.
 
 const std = @import("std");
+const assert = std.debug.assert;
+const build_options = @import("build_options");
 
-pub const version = std.SemanticVersion{ .major = 0, .minor = 1, .patch = 0 };
+/// Library version, parsed at comptime from the `build.zig.zon` manifest so the two cannot drift.
+pub const version = std.SemanticVersion.parse(build_options.version) catch
+    @compileError("build.zig.zon `.version` is not a valid semantic version");
 
 pub const types = @import("types.zig");
 pub const interfaces = @import("interfaces.zig");
@@ -24,4 +28,11 @@ pub const adapters = @import("adapters.zig");
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "version: matches the manifest string byte for byte" {
+    var buffer: [64]u8 = undefined;
+    const rendered = try std.fmt.bufPrint(&buffer, "{f}", .{version});
+    try std.testing.expectEqualStrings(build_options.version, rendered);
+    assert(build_options.version.len > 0);
 }

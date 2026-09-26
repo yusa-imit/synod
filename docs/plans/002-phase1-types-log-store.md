@@ -17,19 +17,19 @@ becomes a MAJOR-bump negotiation the moment something does.
 
 ## Scope
 
-- [ ] **Bug: the released v0.2.0 reports itself as 0.1.0.** `src/root.zig:11` hardcodes
+- [x] **Bug: the released v0.2.0 reports itself as 0.1.0.** `src/root.zig:11` hardcodes
       `SemanticVersion{0,1,0}` while `build.zig.zon` says `0.2.0` and tag `v0.2.0` is published,
       so `synod version` prints `synod 0.1.0`; `main.zig:37` only tests `major == 0`. Derive
       `version` from the manifest (comptime parse of `@embedFile("../build.zig.zon")`, or
       `b.addOptions`) so they cannot drift again. *Verify:* `./zig-out/bin/synod version` prints
       `synod 0.2.0`; editing the zon version turns `zig build test` red. `blocked_by: none`
-- [ ] **Tiger Style gap, part 1 — remove the two size violations.** `tools/tidy.zig` is 1266
+- [x] **Tiger Style gap, part 1 — remove the two size violations.** `tools/tidy.zig` is 1266
       lines (limit 800), `build.zig`'s `pub fn build` is 87 (limit 70); deferred since cycle 5
       because tidy's `main()` walks `src/` only. Move tidy's ~550 lines of inline tests to
       `tools/tidy_test.zig` and extract `build.zig`'s step wiring into helpers — pure moves.
       *Verify:* `wc -l tools/tidy.zig` < 800, `zig build test` count unchanged, `tidy` green.
       `blocked_by: none`
-- [ ] **Tiger Style gap, part 2 — point the gate at itself.** Widen tidy's walk to `tools/`, add
+- [x] **Tiger Style gap, part 2 — point the gate at itself.** Widen tidy's walk to `tools/`, add
       a function-length check for `build.zig`. Splitting first (part 1) removes the red window a
       single combined PR would otherwise need. *Verify:* `zig build tidy` green; reverting either
       part-1 move turns it red. `blocked_by: none`
