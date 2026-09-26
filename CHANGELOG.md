@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `synod.version` (and `synod version`) is now derived from `build.zig.zon` at build time
+  instead of a hardcoded `0.1.0`, so the reported version can no longer drift from the
+  manifest; v0.2.0 reported itself as 0.1.0.
+
 ## [0.2.0] - 2026-09-16
 
 ### Changed

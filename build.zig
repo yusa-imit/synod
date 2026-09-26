@@ -8,6 +8,7 @@
 //!   zig build docs       — generate API docs into zig-out/docs
 
 const std = @import("std");
+const manifest = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -40,9 +41,15 @@ const TestSteps = struct {
 };
 
 fn addLibraryModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    // The version comes from build.zig.zon so `synod.version` cannot drift from the manifest.
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", manifest.version);
     return b.addModule("synod", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "build_options", .module = options.createModule() },
+        },
     });
 }
 
