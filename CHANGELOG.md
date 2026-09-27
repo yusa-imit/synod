@@ -5,11 +5,21 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- `src/types.zig` (plan 002, item 1A-i): `NodeId`, `Term`, `Index` as distinct non-exhaustive
+  `enum(u64)` types (never `usize`), each with a named zero sentinel; `EntryKind`, `Entry`,
+  `HardState` (24-byte `extern struct`, no padding, `eql` and `validateTransition`), and
+  `Snapshot`. See ADR-004 for the wire-shape rationale.
+
 ### Fixed
 
 - `synod.version` (and `synod version`) is now derived from `build.zig.zon` at build time
   instead of a hardcoded `0.1.0`, so the reported version can no longer drift from the
   manifest; v0.2.0 reported itself as 0.1.0.
+- `tools/tidy.zig`'s wire-`usize` check now recognizes `extern`/`packed` struct and union
+  declarations — previously `pub const HardState = extern struct { ... }` silently skipped the
+  check entirely.
 
 ## [0.2.0] - 2026-09-16
 

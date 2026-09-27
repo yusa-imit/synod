@@ -594,6 +594,36 @@ test "tidy: checkWireUsize does not match a name that is a substring of another 
     try testing.expectEqual(@as(usize, 0), violations.len);
 }
 
+test "tidy: checkWireUsize flags a usize field inside an extern wire struct" {
+    // ADR-004: HardState is `extern struct` for byte-stable layout; the check must not treat
+    // the `extern` modifier as an excuse to skip the struct.
+    const source =
+        \\pub const HardState = extern struct {
+        \\    term: u64,
+        \\    commit_index: usize,
+        \\};
+        \\
+    ;
+    const violations = try tidy.checkWireUsize(testing.allocator, "src/types.zig", source);
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 1), violations.len);
+    try testing.expectEqualStrings("HardState", violations[0].type_name);
+}
+
+test "tidy: checkWireUsize flags a usize field inside a packed wire struct" {
+    const source =
+        \\pub const HardState = packed struct {
+        \\    term: u64,
+        \\    commit_index: usize,
+        \\};
+        \\
+    ;
+    const violations = try tidy.checkWireUsize(testing.allocator, "src/types.zig", source);
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 1), violations.len);
+    try testing.expectEqualStrings("HardState", violations[0].type_name);
+}
+
 // -- hasModuleHeader -------------------------------------------------------------------------
 
 test "tidy: hasModuleHeader accepts a file starting with //!" {

@@ -372,9 +372,26 @@ fn containsWord(haystack: []const u8, word: []const u8) bool {
     return false;
 }
 
+/// Returns whether `after_eq` starts with a struct-or-union declaration keyword, optionally
+/// preceded by the `extern` or `packed` layout modifier (e.g. `extern struct`, `packed union`).
+/// An `extern`/`packed` struct is exactly the shape a wire type needs for byte-stable layout, so
+/// it must be recognised here or `checkWireUsize` silently skips it (ADR-004).
+fn startsWithWireDeclKeyword(after_eq: []const u8) bool {
+    if (std.mem.startsWith(u8, after_eq, "struct")) return true;
+    if (std.mem.startsWith(u8, after_eq, "union")) return true;
+    for ([_][]const u8{ "extern", "packed" }) |modifier| {
+        if (!std.mem.startsWith(u8, after_eq, modifier)) continue;
+        const rest = std.mem.trimStart(u8, after_eq[modifier.len..], " \t\r\n");
+        if (std.mem.startsWith(u8, rest, "struct")) return true;
+        if (std.mem.startsWith(u8, rest, "union")) return true;
+    }
+    return false;
+}
+
 /// Returns the byte offset just past a whole-word occurrence of `name` in `source` at or
 /// after `from` that is (across any run of spaces, tabs, or newlines) followed by `=` and
-/// then `struct` or `union`, or `null` if none remains.
+/// then a wire-decl keyword (`struct`/`union`, optionally `extern`/`packed`-qualified), or
+/// `null` if none remains.
 fn findWireDeclEnd(source: []const u8, from: usize, name: []const u8) ?usize {
     assert(name.len > 0);
     assert(from <= source.len);
@@ -389,9 +406,7 @@ fn findWireDeclEnd(source: []const u8, from: usize, name: []const u8) ?usize {
         const after_name = std.mem.trimStart(u8, source[at + name.len ..], " \t\r\n");
         if (!std.mem.startsWith(u8, after_name, "=")) continue;
         const after_eq = std.mem.trimStart(u8, after_name[1..], " \t\r\n");
-        const is_struct = std.mem.startsWith(u8, after_eq, "struct");
-        const is_union = std.mem.startsWith(u8, after_eq, "union");
-        if (!is_struct and !is_union) continue;
+        if (!startsWithWireDeclKeyword(after_eq)) continue;
         return at + name.len;
     }
     return null;
