@@ -39,7 +39,7 @@ becomes a MAJOR-bump negotiation the moment something does.
       explicit `kind` so conf-change entries stay distinguishable in Phase 4. *Verify:* `test` +
       `tidy` green, no `NotImplemented` left, `grep -c assert src/types.zig` ≥ 2x `pub fn` count.
       `blocked_by: none`
-- [ ] **1A-ii `types.zig` — `Message` union and `ConfChange`.** Split from 1A-i: the message set
+- [x] **1A-ii `types.zig` — `Message` union and `ConfChange`.** Split from 1A-i: the message set
       (RequestVote/PreVote, AppendEntries, InstallSnapshot, responses) plus exhaustiveness tests
       does not fit one cycle beside the scalars. Every variant carries `protocol_version: u16`
       and `term` now, per `REALM.md` — rolling upgrades are why it exists and retrofitting it is

@@ -11,6 +11,10 @@ All notable changes to this project are documented in this file. Format follows
   `enum(u64)` types (never `usize`), each with a named zero sentinel; `EntryKind`, `Entry`,
   `HardState` (24-byte `extern struct`, no padding, `eql` and `validateTransition`), and
   `Snapshot`. See ADR-004 for the wire-shape rationale.
+- `src/types.zig` (plan 002, item 1A-ii): the `Message` union (`RequestVote`/`PreVote`/
+  `AppendEntries`/`InstallSnapshot` and their responses), `Header` (protocol-version and term
+  on every variant), and the joint-consensus `Configuration`/`ConfChange` membership types,
+  each with a structural `validate()`. See ADR-005 for the wire-shape rationale.
 
 ### Fixed
 
