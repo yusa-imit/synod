@@ -33,7 +33,7 @@ becomes a MAJOR-bump negotiation the moment something does.
       a function-length check for `build.zig`. Splitting first (part 1) removes the red window a
       single combined PR would otherwise need. *Verify:* `zig build tidy` green; reverting either
       part-1 move turns it red. `blocked_by: none`
-- [ ] **1A-i `types.zig` — scalars, `Entry`, `HardState`, `Snapshot`.** Tests first for
+- [x] **1A-i `types.zig` — scalars, `Entry`, `HardState`, `Snapshot`.** Tests first for
       `Term`/`Index` ordering and `HardState` comparison. `NodeId`/`Term`/`Index` are distinct
       `u64`-backed decls (never `usize`); `Entry{ index, term, kind, data: []const u8 }` keeps an
       explicit `kind` so conf-change entries stay distinguishable in Phase 4. *Verify:* `test` +
