@@ -51,7 +51,7 @@ becomes a MAJOR-bump negotiation the moment something does.
       index on append and index-in-range on `termAt`; garbage *caller* state asserts, garbage
       *data* returns a typed error. *Verify:* append/truncate/lookup tests including empty-log
       and capacity-limit negative space. `blocked_by: none`
-- [ ] **1B-ii `log.zig` — conflict-point search and `validate()`.** Split from 1B-i: the Raft
+- [x] **1B-ii `log.zig` — conflict-point search and `validate()`.** Split from 1B-i: the Raft
       conflict scan plus the invariant checker is its own cycle. `validate()` returns
       `error.Invariant*` (contiguous indices, non-decreasing terms, no snapshot-boundary gap)
       instead of asserting, per `REALM.md`, so Phase 3's simulator can report the seed. *Verify:*

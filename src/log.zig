@@ -112,6 +112,83 @@ pub const Log = struct {
         assert(self.count > 0);
         return self.entries[self.count - 1].index;
     }
+
+    /// Raft thesis §5.3 fast-backtrack conflict-point search, run by a leader against a
+    /// follower's log via the follower's own `AppendResponse.outcome.rejected`. Precondition
+    /// (caller contract, asserted — not returned as an error): `(prev_log_index == .zero) ==
+    /// (prev_log_term == .zero)`, the same shape `Message.validate` already enforces on every
+    /// peer-supplied `prev_log_index`/`prev_log_term` pair before this is ever called. Returns
+    /// `null` when there is no conflict: either `prev_log_index == .zero` (Raft's "no previous
+    /// entry" sentinel always matches) or the term this log holds at `prev_log_index` equals
+    /// `prev_log_term`. Returns `Conflict{ .zero, .zero }` when `prev_log_index` is past
+    /// `lastIndex()` — the follower's log is simply shorter than the leader believes. Otherwise
+    /// returns the conflicting term actually held at `prev_log_index`, together with the first
+    /// index (never below 1) of that term's contiguous run, found by scanning backward.
+    pub fn conflictAt(self: *const Log, prev_log_index: Index, prev_log_term: Term) ?Conflict {
+        assert((prev_log_index == .zero) == (prev_log_term == .zero));
+        assert(self.count <= self.entries.len);
+
+        if (prev_log_index == .zero) return null;
+
+        if (prev_log_index.order(self.lastIndex()) == .gt) {
+            return .{ .index = .zero, .term = .zero };
+        }
+
+        const conflict_term = self.termAt(prev_log_index);
+        if (conflict_term == prev_log_term) return null;
+
+        var first_index = prev_log_index;
+        for (0..self.entries.len) |_| {
+            if (@intFromEnum(first_index) <= 1) break;
+            const candidate: Index = @enumFromInt(@intFromEnum(first_index) - 1);
+            if (self.termAt(candidate) != conflict_term) break;
+            first_index = candidate;
+        }
+
+        assert(@intFromEnum(first_index) >= 1);
+        assert(first_index.order(prev_log_index) != .gt);
+        return .{ .index = first_index, .term = conflict_term };
+    }
+
+    /// Data-corruption errors `validate` returns — never raised by any state reachable through
+    /// the normal `append`/`truncate` API, only by bit-rot or a hand-corrupted backing array
+    /// (e.g. a test double, or a peer-loaded store in the simulator). REALM.md: "Invariant
+    /// violations return `error.Invariant*` ... rather than asserting/panicking mid-run."
+    pub const InvariantError = error{
+        /// `entries[i].index != i + 1` for some live entry: the log is no longer contiguous.
+        InvariantIndexNotContiguous,
+        /// `entries[i].term` is lower than `entries[i - 1].term`: Raft terms never regress
+        /// along the log.
+        InvariantTermRegressed,
+        /// `count > 0` and `entries[0].index != 1`: there is no compaction/snapshot offset yet
+        /// (module header), so the first live entry must always be index 1.
+        InvariantSnapshotGap,
+    };
+
+    /// Defense-in-depth invariant check for the simulator: index contiguity, non-decreasing
+    /// terms, and no snapshot-boundary gap, across `entries[0..count]`. A log built only
+    /// through `append`/`truncate` can never fail this — it exists to catch corrupted state,
+    /// not caller bugs, so it returns a typed error rather than asserting (see `InvariantError`
+    /// doc). No precondition beyond `self` being initialized.
+    pub fn validate(self: *const Log) InvariantError!void {
+        assert(self.count <= self.entries.len);
+
+        if (self.count == 0) return;
+        if (@intFromEnum(self.entries[0].index) != 1) return error.InvariantSnapshotGap;
+
+        for (self.entries[0..self.count], 0..) |entry, i| {
+            const expected_index: u64 = i + 1;
+            if (@intFromEnum(entry.index) != expected_index) {
+                return error.InvariantIndexNotContiguous;
+            }
+            if (i > 0 and entry.term.order(self.entries[i - 1].term) == .lt) {
+                return error.InvariantTermRegressed;
+            }
+        }
+
+        assert(@intFromEnum(self.entries[0].index) == 1);
+        assert(@intFromEnum(self.entries[self.count - 1].index) == self.count);
+    }
 };
 
 /// Test-only helper: builds an `Entry` from raw integers so test cases stay one line each
@@ -153,6 +230,7 @@ test "log: appending one entry becomes lastIndex and is visible via termAt" {
     try testing.expectEqual(entry.term, log.termAt(entry.index));
     // Term before the first entry is still the "no previous entry" sentinel.
     try testing.expectEqual(Term.zero, log.termAt(.zero));
+    try log.validate();
 }
 
 test "log: appending a sequence tracks lastIndex and termAt at every index along the way" {
@@ -175,6 +253,7 @@ test "log: appending a sequence tracks lastIndex and termAt at every index along
             try testing.expectEqual(@as(Term, @enumFromInt(past_term)), log.termAt(past_index));
         }
     }
+    try log.validate();
 }
 
 test "log: append succeeds exactly up to entries_max and then returns error.LogFull" {
@@ -194,6 +273,7 @@ test "log: append succeeds exactly up to entries_max and then returns error.LogF
     try testing.expectError(error.LogFull, result);
     // The failed append must not have mutated the log.
     try testing.expectEqual(@as(Index, @enumFromInt(entries_max)), log.lastIndex());
+    try log.validate();
 }
 
 test "log: append into a single-slot log fills at entries_max = 1" {
@@ -204,6 +284,7 @@ test "log: append into a single-slot log fills at entries_max = 1" {
     try log.append(testEntry(1, 5));
     try testing.expectEqual(@as(Index, @enumFromInt(1)), log.lastIndex());
     try testing.expectError(error.LogFull, log.append(testEntry(2, 5)));
+    try log.validate();
 }
 
 test "log: truncate mid-log drops the suffix and keeps the prefix queryable" {
@@ -225,6 +306,7 @@ test "log: truncate mid-log drops the suffix and keeps the prefix queryable" {
     try log.append(testEntry(3, 99));
     try testing.expectEqual(@as(Index, @enumFromInt(3)), log.lastIndex());
     try testing.expectEqual(@as(Term, @enumFromInt(99)), log.termAt(@enumFromInt(3)));
+    try log.validate();
 }
 
 test "log: truncating from the first index empties the log" {
@@ -239,6 +321,7 @@ test "log: truncating from the first index empties the log" {
 
     try testing.expectEqual(Index.zero, log.lastIndex());
     try testing.expectEqual(Term.zero, log.termAt(.zero));
+    try log.validate();
 }
 
 test "log: truncating at exactly lastIndex() + 1 is a legal no-op" {
@@ -254,6 +337,7 @@ test "log: truncating at exactly lastIndex() + 1 is a legal no-op" {
 
     try testing.expectEqual(before_last, log.lastIndex());
     try testing.expectEqual(@as(Term, @enumFromInt(3)), log.termAt(before_last));
+    try log.validate();
 }
 
 test "log: truncating an empty log at index one is a legal no-op" {
@@ -264,6 +348,254 @@ test "log: truncating an empty log at index one is a legal no-op" {
     log.truncate(Index.zero.next());
 
     try testing.expectEqual(Index.zero, log.lastIndex());
+    try log.validate();
+}
+
+// --- conflictAt: Raft §5.3 fast-backtrack conflict-point search (item 1B-ii) ---
+
+test "log: conflictAt at prev_log_index zero always matches, empty or not" {
+    var empty_log: Log = undefined;
+    try empty_log.init(testing.allocator, .{ .entries_max = 4 });
+    defer empty_log.deinit(testing.allocator);
+    try testing.expectEqual(@as(?Conflict, null), empty_log.conflictAt(.zero, .zero));
+
+    var log: Log = undefined;
+    try log.init(testing.allocator, .{ .entries_max = 4 });
+    defer log.deinit(testing.allocator);
+    try log.append(testEntry(1, 5));
+    try log.append(testEntry(2, 5));
+    try testing.expectEqual(@as(?Conflict, null), log.conflictAt(.zero, .zero));
+}
+
+test "log: conflictAt reports a shorter log's boundary as zero, including the empty log" {
+    var empty_log: Log = undefined;
+    try empty_log.init(testing.allocator, .{ .entries_max = 4 });
+    defer empty_log.deinit(testing.allocator);
+    const expected_zero: Conflict = .{ .index = .zero, .term = .zero };
+    try testing.expectEqual(
+        expected_zero,
+        empty_log.conflictAt(@enumFromInt(1), @enumFromInt(1)).?,
+    );
+
+    var log: Log = undefined;
+    try log.init(testing.allocator, .{ .entries_max = 4 });
+    defer log.deinit(testing.allocator);
+    try log.append(testEntry(1, 5));
+    try log.append(testEntry(2, 5));
+
+    // prev_log_index (5) is past lastIndex() (2): the follower's log is shorter.
+    try testing.expectEqual(
+        expected_zero,
+        log.conflictAt(@enumFromInt(5), @enumFromInt(9)).?,
+    );
+}
+
+test "log: conflictAt returns null when the term at prev_log_index matches" {
+    var log: Log = undefined;
+    try log.init(testing.allocator, .{ .entries_max = 8 });
+    defer log.deinit(testing.allocator);
+
+    const terms = [_]u64{ 1, 1, 2, 3, 3 };
+    for (terms, 0..) |term, i| try log.append(testEntry(i + 1, term));
+
+    for (terms, 0..) |term, i| {
+        const index: Index = @enumFromInt(i + 1);
+        try testing.expectEqual(
+            @as(?Conflict, null),
+            log.conflictAt(index, @enumFromInt(term)),
+        );
+    }
+}
+
+test "log: conflictAt finds the first index of a single mismatching entry's term" {
+    var log: Log = undefined;
+    try log.init(testing.allocator, .{ .entries_max = 8 });
+    defer log.deinit(testing.allocator);
+
+    // Index 1 term 1, index 2 term 2, index 3 term 3: each term appears exactly once.
+    try log.append(testEntry(1, 1));
+    try log.append(testEntry(2, 2));
+    try log.append(testEntry(3, 3));
+
+    // Follower's term at index 3 is 3; leader claims prev_log_term 7 (a mismatch): the
+    // follower's own term (3) at that index is reported, with its own (single-entry) run start.
+    const conflict = log.conflictAt(@enumFromInt(3), @enumFromInt(7)).?;
+    try testing.expectEqual(@as(Term, @enumFromInt(3)), conflict.term);
+    try testing.expectEqual(@as(Index, @enumFromInt(3)), conflict.index);
+}
+
+test "log: conflictAt finds the first index of a run of consecutive entries sharing a term" {
+    var log: Log = undefined;
+    try log.init(testing.allocator, .{ .entries_max = 8 });
+    defer log.deinit(testing.allocator);
+
+    // Indices 1-2 term 1, indices 3-6 term 2 (the conflicting run), index 7 term 3.
+    const terms = [_]u64{ 1, 1, 2, 2, 2, 2, 3 };
+    for (terms, 0..) |term, i| try log.append(testEntry(i + 1, term));
+
+    // prev_log_index=5 is inside the term-2 run; the leader's claimed term (9) mismatches.
+    const conflict = log.conflictAt(@enumFromInt(5), @enumFromInt(9)).?;
+    try testing.expectEqual(@as(Term, @enumFromInt(2)), conflict.term);
+    try testing.expectEqual(@as(Index, @enumFromInt(3)), conflict.index); // First of the run.
+}
+
+test "log: conflictAt does not scan below index 1 when the conflicting run starts at 1" {
+    var log: Log = undefined;
+    try log.init(testing.allocator, .{ .entries_max = 8 });
+    defer log.deinit(testing.allocator);
+
+    // The entire log shares one term: the conflicting run starts at index 1.
+    const terms = [_]u64{ 4, 4, 4 };
+    for (terms, 0..) |term, i| try log.append(testEntry(i + 1, term));
+
+    const conflict = log.conflictAt(@enumFromInt(3), @enumFromInt(9)).?;
+    try testing.expectEqual(@as(Term, @enumFromInt(4)), conflict.term);
+    // Must land exactly on index 1, not underflow past it.
+    try testing.expectEqual(@as(Index, @enumFromInt(1)), conflict.index);
+}
+
+/// Trivial, obviously-correct linear-scan reference for `conflictAt`, independent of whatever
+/// `conflictAt` itself does: walk backward from `prev_log_index` while the term still matches
+/// the term found at `prev_log_index`, and report the first index of that run.
+fn referenceConflictAt(log: *const Log, prev_log_index: Index, prev_log_term: Term) ?Conflict {
+    if (prev_log_index == .zero) return null;
+    if (prev_log_index.order(log.lastIndex()) == .gt) {
+        return .{ .index = .zero, .term = .zero };
+    }
+    const actual_term = log.termAt(prev_log_index);
+    if (actual_term == prev_log_term) return null;
+
+    var first_index = prev_log_index;
+    while (@intFromEnum(first_index) > 1) {
+        const candidate: Index = @enumFromInt(@intFromEnum(first_index) - 1);
+        if (log.termAt(candidate) != actual_term) break;
+        first_index = candidate;
+    }
+    return .{ .index = first_index, .term = actual_term };
+}
+
+test "log: conflictAt seeded model matches a trivial backward linear-scan reference" {
+    const entries_max = 12;
+    const queries_max = 200;
+
+    var log: Log = undefined;
+    try log.init(testing.allocator, .{ .entries_max = entries_max });
+    defer log.deinit(testing.allocator);
+
+    var prng = std.Random.DefaultPrng.init(0xc0f1_71c7);
+    const random = prng.random();
+
+    // Build a log with a random non-decreasing term sequence, like a real Raft log.
+    var term: u64 = 1;
+    var i: u64 = 1;
+    while (i <= entries_max) : (i += 1) {
+        if (random.boolean()) term += 1;
+        try log.append(testEntry(i, term));
+    }
+    try log.validate();
+
+    for (0..queries_max) |_| {
+        const prev_log_index: Index = @enumFromInt(random.intRangeAtMost(u64, 0, entries_max + 2));
+        var prev_log_term: Term = undefined;
+        if (prev_log_index == .zero) {
+            prev_log_term = .zero;
+        } else if (random.boolean() and prev_log_index.order(log.lastIndex()) != .gt) {
+            // Force the "matches" path with the real term at that index.
+            prev_log_term = log.termAt(prev_log_index);
+        } else {
+            // Force (or at least likely force) the "mismatch" path with a deliberately wrong term.
+            prev_log_term = @enumFromInt(random.intRangeAtMost(u64, 1, term + 5));
+        }
+
+        const expected = referenceConflictAt(&log, prev_log_index, prev_log_term);
+        const actual = log.conflictAt(prev_log_index, prev_log_term);
+        try testing.expectEqual(expected, actual);
+    }
+}
+
+// --- validate(): defense-in-depth invariant checker for Phase 3's simulator (item 1B-ii) ---
+
+test "log: InvariantError is exhaustively switchable" {
+    const err: Log.InvariantError = error.InvariantIndexNotContiguous;
+    switch (err) {
+        error.InvariantIndexNotContiguous,
+        error.InvariantTermRegressed,
+        error.InvariantSnapshotGap,
+        => {},
+    }
+}
+
+test "log: a fresh empty log validates successfully" {
+    var log: Log = undefined;
+    try log.init(testing.allocator, .{ .entries_max = 4 });
+    defer log.deinit(testing.allocator);
+
+    try log.validate();
+}
+
+test "log: a log built entirely through append/truncate always validates successfully" {
+    var log: Log = undefined;
+    try log.init(testing.allocator, .{ .entries_max = 8 });
+    defer log.deinit(testing.allocator);
+
+    var i: u64 = 1;
+    while (i <= 5) : (i += 1) try log.append(testEntry(i, i));
+    try log.validate();
+
+    log.truncate(@enumFromInt(3));
+    try log.validate();
+
+    try log.append(testEntry(3, 9));
+    try log.append(testEntry(4, 9));
+    try log.validate();
+}
+
+test "log: validate rejects a hand-corrupted non-contiguous index" {
+    var log: Log = undefined;
+    try log.init(testing.allocator, .{ .entries_max = 8 });
+    defer log.deinit(testing.allocator);
+
+    var i: u64 = 1;
+    while (i <= 4) : (i += 1) try log.append(testEntry(i, 1));
+    try log.validate();
+
+    // Test-only escape hatch: simulate bit-rot/corruption by writing directly into the backing
+    // array, bypassing `append`'s precondition asserts entirely (this is exactly the kind of
+    // corruption `validate()` exists to catch, since the normal API can never produce it).
+    log.entries[2].index = @enumFromInt(99); // Was index 3; now breaks contiguity.
+
+    try testing.expectError(error.InvariantIndexNotContiguous, log.validate());
+}
+
+test "log: validate rejects a hand-corrupted term regression" {
+    var log: Log = undefined;
+    try log.init(testing.allocator, .{ .entries_max = 8 });
+    defer log.deinit(testing.allocator);
+
+    var i: u64 = 1;
+    while (i <= 4) : (i += 1) try log.append(testEntry(i, i)); // Terms 1,2,3,4.
+    try log.validate();
+
+    // Corrupt entry 3 (index 3, was term 3) to a term below its predecessor's (entry 2, term 2).
+    log.entries[2].term = @enumFromInt(1);
+
+    try testing.expectError(error.InvariantTermRegressed, log.validate());
+}
+
+test "log: validate rejects a hand-corrupted snapshot-boundary gap" {
+    var log: Log = undefined;
+    try log.init(testing.allocator, .{ .entries_max = 8 });
+    defer log.deinit(testing.allocator);
+
+    var i: u64 = 1;
+    while (i <= 3) : (i += 1) try log.append(testEntry(i, 1));
+    try log.validate();
+
+    // Corrupt the first live entry's index: there is no compaction/snapshot-offset support yet
+    // (item 1B-ii's scope), so index 1 must always be the first live entry.
+    log.entries[0].index = @enumFromInt(2);
+
+    try testing.expectError(error.InvariantSnapshotGap, log.validate());
 }
 
 /// A trivial, obviously-correct reference model against which `Log`'s behavior is compared
@@ -300,6 +632,9 @@ fn checkInvariants(log: *const Log, model: *const ReferenceModel) !void {
         const index: Index = @enumFromInt(i);
         try testing.expectEqual(model.termAt(index), log.termAt(index));
     }
+    // ADR-003: `validate()` runs alongside `checkInvariants` after every step, since a log
+    // built entirely through the normal API must never fail its own invariant checker.
+    try log.validate();
 }
 
 test "log: seeded model-based append/truncate matches a trivial reference" {
@@ -347,4 +682,5 @@ const types = @import("types.zig");
 const Index = types.Index;
 const Term = types.Term;
 const Entry = types.Entry;
+const Conflict = types.Conflict;
 const assert = std.debug.assert;
