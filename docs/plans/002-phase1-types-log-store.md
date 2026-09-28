@@ -46,7 +46,7 @@ becomes a MAJOR-bump negotiation the moment something does.
       a wire break. `ConfChange` is joint-consensus-shaped, no single-server path. *Verify:* a
       test switches exhaustively over `Message` — a new variant, or one built without a
       `protocol_version`, must fail to compile. `blocked_by: none`
-- [ ] **1B-i `log.zig` — `Log` with `append`/`truncate`/`termAt`/`lastIndex`.** In-memory,
+- [x] **1B-i `log.zig` — `Log` with `append`/`truncate`/`termAt`/`lastIndex`.** In-memory,
       allocated at `init`, bounded capacity from options (no unbounded growth). Asserts monotonic
       index on append and index-in-range on `termAt`; garbage *caller* state asserts, garbage
       *data* returns a typed error. *Verify:* append/truncate/lookup tests including empty-log

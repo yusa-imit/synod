@@ -15,6 +15,9 @@ All notable changes to this project are documented in this file. Format follows
   `AppendEntries`/`InstallSnapshot` and their responses), `Header` (protocol-version and term
   on every variant), and the joint-consensus `Configuration`/`ConfChange` membership types,
   each with a structural `validate()`. See ADR-005 for the wire-shape rationale.
+- `src/log.zig` (plan 002, item 1B-i): in-memory Raft `Log` — `init`/`deinit`/`append`/
+  `truncate`/`termAt`/`lastIndex`, allocated once at `init` from a bounded `entries_max`,
+  returning `error.LogFull` at capacity rather than growing unbounded.
 
 ### Fixed
 
