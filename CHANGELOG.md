@@ -18,6 +18,11 @@ All notable changes to this project are documented in this file. Format follows
 - `src/log.zig` (plan 002, item 1B-i): in-memory Raft `Log` — `init`/`deinit`/`append`/
   `truncate`/`termAt`/`lastIndex`, allocated once at `init` from a bounded `entries_max`,
   returning `error.LogFull` at capacity rather than growing unbounded.
+- `src/log.zig` (plan 002, item 1B-ii): `Log.conflictAt`, the Raft thesis §5.3 fast-backtrack
+  conflict-point search over `AppendResponse.outcome.rejected`'s `Conflict` hint; and
+  `Log.validate`/`InvariantError`, a defense-in-depth corruption checker (index contiguity,
+  non-decreasing terms, no snapshot-boundary gap) for Phase 3's simulator to report a failing
+  seed instead of panicking.
 
 ### Fixed
 
