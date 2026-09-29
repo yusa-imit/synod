@@ -30,6 +30,13 @@ All notable changes to this project are documented in this file. Format follows
   (`LogStore.WriteError`/`UpdateError`/`ReadError`, `StateMachine.ApplyError`/`SnapshotError`/
   `RestoreError`) replace the PRD's `anyerror`; `Rng.uint_less_than` is a one-draw multiply-high
   bound. See ADR-006.
+- `src/store.zig` (plan 002, item 1D): `MemoryStore`, an in-memory `LogStore` that copies all
+  entry, snapshot and node-list bytes into four buffers allocated once in `init` from
+  `Options` (`entries_max`, `data_bytes_max`, `snapshot_bytes_max`); `StoreFull` is checked
+  before any mutation. `check_invariants()` names the first broken invariant. The reusable
+  `store.conformance(store: LogStore)` suite (`src/store_conformance.zig`) drives only the
+  vtable, so the future strata adapter runs the same cases; a seeded model-based test
+  compares `MemoryStore` against a trivial reference table.
 
 ### Fixed
 

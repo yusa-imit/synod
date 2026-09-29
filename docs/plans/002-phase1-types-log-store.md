@@ -57,14 +57,14 @@ becomes a MAJOR-bump negotiation the moment something does.
       instead of asserting, per `REALM.md`, so Phase 3's simulator can report the seed. *Verify:*
       `validate()` runs at the end of every log-mutating test (ADR-003) and a hand-corrupted
       entry array yields the specific `error.Invariant*`. `blocked_by: none`
-- [ ] **1C `interfaces.zig` — the five vtables.** `Transport`/`LogStore`/`StateMachine`/`Clock`/
+- [x] **1C `interfaces.zig` — the five vtables.** `Transport`/`LogStore`/`StateMachine`/`Clock`/
       `Rng` in a `ptr` + `*const VTable` shape. **Correction to PRD §4.1's sketch, state it in
       the PR body:** `anyerror!void` becomes a named error set per method (Tiger Style bans
       `anyerror` in a `pub fn`), and `snapshot(writer: anytype)` is not expressible in a function
       pointer at all — use `*std.Io.Writer`/`*std.Io.Reader`, legal because `interfaces.zig` is
       not in tidy's `core_purity_files` (ADR-002 puts the `Io` boundary at driver/adapters).
       *Verify:* no-op impls dispatch; `tidy` green. `blocked_by: none`
-- [ ] **1D `store.zig` — in-memory `LogStore` + reusable conformance suite.** Implements the 1C
+- [x] **1D `store.zig` — in-memory `LogStore` + reusable conformance suite.** Implements the 1C
       vtable over `Log`, with `saveHardState`/`saveSnapshot`/`loadSnapshot`. Write the tests as
       `fn conformance(store: LogStore)` the future strata adapter (PRD 6B) calls unchanged — one
       suite, two implementations, which is also ADR-003's paired-path requirement. *Verify:*
