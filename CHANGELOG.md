@@ -23,6 +23,13 @@ All notable changes to this project are documented in this file. Format follows
   `Log.validate`/`InvariantError`, a defense-in-depth corruption checker (index contiguity,
   non-decreasing terms, no snapshot-boundary gap) for Phase 3's simulator to report a failing
   seed instead of panicking.
+- `src/interfaces.zig` (plan 002, item 1C): the five vtables `Transport`, `LogStore`,
+  `StateMachine`, `Clock`, `Rng` and `SnapshotRecord`, each two words and built only through
+  comptime `X.init(&impl)` (a static per-type vtable; `@compileError` on a missing or mis-typed
+  method). Forwarding methods assert the caller's contract. Narrow named error sets
+  (`LogStore.WriteError`/`UpdateError`/`ReadError`, `StateMachine.ApplyError`/`SnapshotError`/
+  `RestoreError`) replace the PRD's `anyerror`; `Rng.uint_less_than` is a one-draw multiply-high
+  bound. See ADR-006.
 
 ### Fixed
 
