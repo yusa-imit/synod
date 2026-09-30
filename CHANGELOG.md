@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
 ### Changed
 
 - `src/log.zig`, `src/types.zig`: camelCase functions renamed to snake_case per Tiger Style §3.6
@@ -19,16 +21,16 @@ All notable changes to this project are documented in this file. Format follows
 
 - `src/types.zig` (plan 002, item 1A-i): `NodeId`, `Term`, `Index` as distinct non-exhaustive
   `enum(u64)` types (never `usize`), each with a named zero sentinel; `EntryKind`, `Entry`,
-  `HardState` (24-byte `extern struct`, no padding, `eql` and `validateTransition`), and
+  `HardState` (24-byte `extern struct`, no padding, `eql` and `validate_transition`), and
   `Snapshot`. See ADR-004 for the wire-shape rationale.
 - `src/types.zig` (plan 002, item 1A-ii): the `Message` union (`RequestVote`/`PreVote`/
   `AppendEntries`/`InstallSnapshot` and their responses), `Header` (protocol-version and term
   on every variant), and the joint-consensus `Configuration`/`ConfChange` membership types,
   each with a structural `validate()`. See ADR-005 for the wire-shape rationale.
 - `src/log.zig` (plan 002, item 1B-i): in-memory Raft `Log` — `init`/`deinit`/`append`/
-  `truncate`/`termAt`/`lastIndex`, allocated once at `init` from a bounded `entries_max`,
+  `truncate`/`term_at`/`last_index`, allocated once at `init` from a bounded `entries_max`,
   returning `error.LogFull` at capacity rather than growing unbounded.
-- `src/log.zig` (plan 002, item 1B-ii): `Log.conflictAt`, the Raft thesis §5.3 fast-backtrack
+- `src/log.zig` (plan 002, item 1B-ii): `Log.conflict_at`, the Raft thesis §5.3 fast-backtrack
   conflict-point search over `AppendResponse.outcome.rejected`'s `Conflict` hint; and
   `Log.validate`/`InvariantError`, a defense-in-depth corruption checker (index contiguity,
   non-decreasing terms, no snapshot-boundary gap) for Phase 3's simulator to report a failing
