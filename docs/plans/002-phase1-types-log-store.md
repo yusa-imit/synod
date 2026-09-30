@@ -70,7 +70,7 @@ becomes a MAJOR-bump negotiation the moment something does.
       suite, two implementations, which is also ADR-003's paired-path requirement. *Verify:*
       append→truncate→reload and hard-state/snapshot round-trips driven through the vtable, not
       the concrete type. `blocked_by: none`
-- [ ] **Re-measure the Tiger Style baseline over real code.** `STATE.md` says the all-zero table
+- [x] **Re-measure the Tiger Style baseline over real code.** `STATE.md` says the all-zero table
       must be re-run once Phase 1 lands; this is that run. Record assert density per module,
       function lengths, first honest `tidy` numbers; flip README's rows for those four modules
       from *planned* to *implemented*. *Verify:* `tidy` green; new table in `STATE.md`.
