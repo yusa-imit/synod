@@ -112,4 +112,5 @@ helper loops and its `fill` vtable is wider than one word.
 - `get` borrows until the next mutation. That constrains how the leader builds
   `AppendRequest`. A range read is added only if plan 003 measures a need.
 - `log.zig`/`types.zig` `camelCase` methods (`lastIndex`, `termAt`, `conflictAt`,
-  `validateTransition`) break tiger-style §6. They are renamed before v0.3.0 pins them.
+  `validateTransition`) broke tiger-style §6. They were renamed to snake_case before v0.3.0
+  pinned them.

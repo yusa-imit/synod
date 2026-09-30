@@ -19,7 +19,7 @@ variant: `NodeId.none` ("no vote", replacing `?NodeId`, matching etcd/raft vecto
 `Index.zero` ("before the first entry"). Comparison is `order()` returning `std.math.Order`;
 `==` works natively; mixing the types fails to compile. `EntryKind` is an exhaustive
 `enum(u8)` with discriminants starting at 1. `HardState` is a 24-byte `extern struct` with
-comptime-asserted layout, and its durability contract is `validateTransition`, which returns
+comptime-asserted layout, and its durability contract is `validate_transition`, which returns
 `error.Invariant*` (REALM.md). These are in-memory types only: they carry no magic, version, or
 checksum, because the core never encodes bytes (PRD §7). Each adapter encoding frames them with
 its own magic, version, and checksum, and the protocol-version field lives on `Message` (1A-ii).

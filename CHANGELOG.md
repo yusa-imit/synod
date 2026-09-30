@@ -7,6 +7,9 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Changed
 
+- `src/log.zig`, `src/types.zig`: camelCase functions renamed to snake_case per Tiger Style §3.6
+  (`last_index`, `term_at`, `conflict_at`, `validate_transition`, and private helpers). Public
+  API rename, done before the v0.3.0 tag pins it.
 - `README.md` (plan 002, item 10): `types`, `interfaces`, `log`, and `store` marked
   *implemented*; status paragraph and install section no longer claim a pure scaffold.
   Tiger Style baseline re-measured over Phase 1 code: `tidy` clean, 0 `NotImplemented` in those
