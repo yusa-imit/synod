@@ -40,11 +40,11 @@ Raft state machine (`raft`, `driver`), SWIM `membership`, `detector`, `clock`, `
 
 ## Install
 
-`v0.2.0` is tagged but contains only the scaffold; `v0.3.0` (plan 002, item 11) is the first
-release with Phase 1 code. To fetch a tag:
+`v0.2.0` contains only the scaffold; `v0.3.0` is the first release with Phase 1 code
+(types, interfaces, log, in-memory store). To fetch a tag:
 
 ```bash
-zig fetch --save https://github.com/yusa-imit/synod/archive/refs/tags/v0.2.0.tar.gz
+zig fetch --save https://github.com/yusa-imit/synod/archive/refs/tags/v0.3.0.tar.gz
 ```
 
 ```zig
