@@ -16,32 +16,32 @@ cluster/sentinel이 이 위로 이식될 예정이지만, 아래 "Status"에 나
 
 ## Status
 
-**Scaffold** — every module below is a stub (`error.NotImplemented`, no real logic). The design
-in this README and in `docs/PRD.md` is the target shape, not the current implementation; treat
-synod as unusable and unreleased as a real dependency until modules start moving from *planned*
-to *implemented*. `docs/plans/001-*.md` tracks the Zig 0.16 + Tiger Style baseline milestone
-currently in progress; Phase 1 (`types`/`log`/`interfaces`/`store`) is the next real code.
+**Phase 1 implemented** — `types`, `interfaces`, `log`, and `store` are real, tested code. The
+Raft state machine (`raft`, `driver`), SWIM `membership`, `detector`, `clock`, `sim`, and
+`adapters` are still stubs (`error.NotImplemented`). The design in this README and in
+`docs/PRD.md` is the target shape; treat synod as unusable as a consensus library until Phase 2
+(`raft`) lands. `docs/plans/002-*.md` tracks the Phase 1 milestone.
 
 ## Modules
 
 | Module | Purpose | Status |
 |---|---|---|
-| `synod.types` | NodeId, Term, Index, Entry, HardState, Snapshot, Message union, ConfChange. | planned |
-| `synod.interfaces` | Transport, LogStore, StateMachine, Clock, Rng vtables. | planned |
-| `synod.log` | In-memory Raft log with append/truncate/term lookup and invariant validation. | planned |
+| `synod.types` | NodeId, Term, Index, Entry, HardState, Snapshot, Message union, ConfChange. | implemented |
+| `synod.interfaces` | Transport, LogStore, StateMachine, Clock, Rng vtables. | implemented |
+| `synod.log` | In-memory Raft log with append/truncate/term lookup and invariant validation. | implemented |
 | `synod.raft` | Pure state machine: election (PreVote), replication, progress tracking, snapshot, joint-consensus membership, ReadIndex and lease reads. | planned |
 | `synod.driver` | Executes Effects against Transport / LogStore / StateMachine. | planned |
 | `synod.membership` | SWIM gossip protocol: ping, ping-req, suspicion, incarnation numbers. | planned |
 | `synod.detector` | φ-accrual failure detector. | planned |
 | `synod.clock` | Hybrid logical clock, Lamport clock, monotonic Clock interface. | planned |
-| `synod.store` | In-memory LogStore for tests and simulation. | planned |
+| `synod.store` | In-memory LogStore for tests and simulation. | implemented |
 | `synod.sim` | Deterministic simulation: virtual clock, virtual network (delay, loss, partition, reorder), scenarios, Raft safety invariants, linearizability checker. | planned |
 | `synod.adapters` | Opt-in adapters: sirocco Transport, strata LogStore. | planned |
 
 ## Install
 
-Not yet released — no tag exists. `v0.2.0` is the next planned release (plan 001, item 11);
-once tagged:
+`v0.2.0` is tagged but contains only the scaffold; `v0.3.0` (plan 002, item 11) is the first
+release with Phase 1 code. To fetch a tag:
 
 ```bash
 zig fetch --save https://github.com/yusa-imit/synod/archive/refs/tags/v0.2.0.tar.gz
