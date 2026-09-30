@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `README.md` (plan 002, item 10): `types`, `interfaces`, `log`, and `store` marked
+  *implemented*; status paragraph and install section no longer claim a pure scaffold.
+  Tiger Style baseline re-measured over Phase 1 code: `tidy` clean, 0 `NotImplemented` in those
+  four modules, no function over 70 lines.
+
 ### Added
 
 - `src/types.zig` (plan 002, item 1A-i): `NodeId`, `Term`, `Index` as distinct non-exhaustive
