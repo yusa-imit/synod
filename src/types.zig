@@ -82,7 +82,7 @@ pub const HardState = extern struct {
     /// A node that has persisted nothing yet.
     pub const empty: HardState = .{ .term = .zero, .vote = .none, .commit_index = .zero };
 
-    /// Options struct for `validateTransition`: `previous` and `next` cannot be swapped silently.
+    /// Options struct for `validate_transition`: `previous` and `next` cannot be swapped silently.
     pub const Transition = struct { previous: HardState, next: HardState };
 
     /// Field-wise equality (used to skip a redundant persist).
@@ -99,7 +99,7 @@ pub const HardState = extern struct {
     /// vote cast in a term is never changed or withdrawn in that term. Checks run in order
     /// term → vote → commit; the first failure is returned. No precondition: both states are
     /// data (read back from a store, or produced by the core under simulation).
-    pub fn validateTransition(transition: *const Transition) Error!void {
+    pub fn validate_transition(transition: *const Transition) Error!void {
         const previous = &transition.previous;
         const next = &transition.next;
         switch (next.term.order(previous.term)) {
@@ -128,7 +128,7 @@ pub const Snapshot = struct {
     data: []const u8,
 };
 
-/// Module-level error set. `validateTransition` is the only fallible function here.
+/// Module-level error set. `validate_transition` is the only fallible function here.
 pub const Error = error{
     InvariantTermRegressed,
     InvariantVoteChanged,
@@ -217,10 +217,10 @@ pub const Configuration = struct {
     /// Structural check only: no local state. Positive space (bounds, order) and negative
     /// space (dupes, a learner also a voter) are both asserted here on the same walk.
     pub fn validate(configuration: *const Configuration) ConfError!void {
-        try validateNodeList(configuration.voters, voters_max, error.ConfVotersTooMany);
+        try validate_node_list(configuration.voters, voters_max, error.ConfVotersTooMany);
         if (configuration.voters.len == 0) return error.ConfVotersEmpty;
-        try validateNodeList(configuration.voters_outgoing, voters_max, error.ConfVotersTooMany);
-        try validateNodeList(configuration.learners, learners_max, error.ConfLearnersTooMany);
+        try validate_node_list(configuration.voters_outgoing, voters_max, error.ConfVotersTooMany);
+        try validate_node_list(configuration.learners, learners_max, error.ConfLearnersTooMany);
         for (configuration.learners) |learner| {
             for (configuration.voters) |voter| {
                 if (learner == voter) return error.ConfLearnerIsVoter;
@@ -233,7 +233,7 @@ pub const Configuration = struct {
 
 /// Checks `nodes` is strictly ascending (no duplicates, no `.none`) and within `max`. Shared
 /// by `voters`, `voters_outgoing`, and `learners` — one sort-order rule, three call sites.
-fn validateNodeList(nodes: []const NodeId, max: u32, too_many: ConfError) ConfError!void {
+fn validate_node_list(nodes: []const NodeId, max: u32, too_many: ConfError) ConfError!void {
     if (nodes.len > max) return too_many;
     for (nodes, 0..) |node, i| {
         if (node == .none) return error.ConfNodesUnsorted;
@@ -301,13 +301,13 @@ pub const Message = union(MessageKind) {
     /// bug — but does assert the checks it just performed (positive space, on the way out).
     pub fn validate(message: *const Message, limits: Limits) MessageError!void {
         const head = message.header();
-        try validateHeader(head);
+        try validate_header(head);
         switch (message.*) {
-            .request_vote, .pre_vote => |*m| try validateVoteRequest(m),
+            .request_vote, .pre_vote => |*m| try validate_vote_request(m),
             .request_vote_response, .pre_vote_response => {},
-            .append_entries => |*m| try validateAppendRequest(m, head.term, limits),
-            .append_entries_response => |*m| try validateAppendResponse(m, head.term),
-            .install_snapshot => |*m| try validateSnapshotRequest(m, head.term, limits),
+            .append_entries => |*m| try validate_append_request(m, head.term, limits),
+            .append_entries_response => |*m| try validate_append_response(m, head.term),
+            .install_snapshot => |*m| try validate_snapshot_request(m, head.term, limits),
             .install_snapshot_response => {},
         }
         assert(head.protocol_version >= protocol_version_min);
@@ -315,7 +315,7 @@ pub const Message = union(MessageKind) {
     }
 };
 
-fn validateHeader(header: *const Header) MessageError!void {
+fn validate_header(header: *const Header) MessageError!void {
     if (header.protocol_version < protocol_version_min or
         header.protocol_version > protocol_version_current)
     {
@@ -329,7 +329,7 @@ fn validateHeader(header: *const Header) MessageError!void {
 }
 
 /// A zero index must carry a zero term and vice versa — "no entry" is the only zero-term case.
-fn validateLogPosition(index: Index, term: Term) MessageError!void {
+fn validate_log_position(index: Index, term: Term) MessageError!void {
     if (index == .zero) {
         if (term != .zero) return error.MessageLogPositionInvalid;
     } else {
@@ -338,20 +338,20 @@ fn validateLogPosition(index: Index, term: Term) MessageError!void {
     assert((index == .zero) == (term == .zero));
 }
 
-fn validateVoteRequest(request: *const VoteRequest) MessageError!void {
-    try validateLogPosition(request.last_log_index, request.last_log_term);
+fn validate_vote_request(request: *const VoteRequest) MessageError!void {
+    try validate_log_position(request.last_log_index, request.last_log_term);
     if (request.last_log_term.order(request.header.term) == .gt) {
         return error.MessageLogPositionInvalid;
     }
     assert(request.last_log_term.order(request.header.term) != .gt);
 }
 
-fn validateAppendRequest(
+fn validate_append_request(
     request: *const AppendRequest,
     header_term: Term,
     limits: Message.Limits,
 ) MessageError!void {
-    try validateLogPosition(request.prev_log_index, request.prev_log_term);
+    try validate_log_position(request.prev_log_index, request.prev_log_term);
     if (request.prev_log_term.order(header_term) == .gt) return error.MessageLogPositionInvalid;
     if (request.entries.len > limits.entries_max) return error.MessageTooLarge;
     var previous_index = request.prev_log_index;
@@ -372,12 +372,12 @@ fn validateAppendRequest(
     assert(previous_term.order(header_term) != .gt);
 }
 
-fn validateAppendResponse(response: *const AppendResponse, header_term: Term) MessageError!void {
+fn validate_append_response(response: *const AppendResponse, header_term: Term) MessageError!void {
     switch (response.outcome) {
         // A heartbeat or a fresh follower legitimately reports no match yet: `.zero` is valid.
         .accepted => {},
         .rejected => |conflict| {
-            validateLogPosition(conflict.index, conflict.term) catch {
+            validate_log_position(conflict.index, conflict.term) catch {
                 return error.MessageConflictInvalid;
             };
             if (conflict.term.order(header_term) == .gt) return error.MessageConflictInvalid;
@@ -386,7 +386,7 @@ fn validateAppendResponse(response: *const AppendResponse, header_term: Term) Me
     }
 }
 
-fn validateSnapshotRequest(
+fn validate_snapshot_request(
     request: *const SnapshotRequest,
     header_term: Term,
     limits: Message.Limits,
@@ -559,7 +559,7 @@ test "types: EntryKind is exhaustive with discriminants starting at 1" {
 }
 
 /// Test-only helper: builds an `Entry` from raw integers so test cases stay one line each.
-fn testEntry(index: u64, term: u64, kind: EntryKind, data: []const u8) Entry {
+fn test_entry(index: u64, term: u64, kind: EntryKind, data: []const u8) Entry {
     return .{
         .index = @enumFromInt(index),
         .term = @enumFromInt(term),
@@ -570,13 +570,13 @@ fn testEntry(index: u64, term: u64, kind: EntryKind, data: []const u8) Entry {
 
 test "types: Entry construction borrows data, not copies" {
     const buf = "hello";
-    const normal_entry = testEntry(1, 1, .normal, buf);
+    const normal_entry = test_entry(1, 1, .normal, buf);
     try std.testing.expectEqual(buf.ptr, normal_entry.data.ptr);
 
-    const noop_entry = testEntry(1, 1, .normal, "");
+    const noop_entry = test_entry(1, 1, .normal, "");
     try std.testing.expectEqual(@as(usize, 0), noop_entry.data.len);
 
-    const max_entry = testEntry(std.math.maxInt(u64), std.math.maxInt(u64), .conf_change, buf);
+    const max_entry = test_entry(std.math.maxInt(u64), std.math.maxInt(u64), .conf_change, buf);
     try std.testing.expectEqual(EntryKind.conf_change, max_entry.kind);
 }
 
@@ -590,7 +590,7 @@ test "types: HardState layout has no padding" {
 }
 
 /// Test-only helper: builds a `HardState` from raw integers so test cases stay one line each.
-fn testHardState(term: u64, vote: u64, commit_index: u64) HardState {
+fn test_hard_state(term: u64, vote: u64, commit_index: u64) HardState {
     return .{
         .term = @enumFromInt(term),
         .vote = @enumFromInt(vote),
@@ -601,17 +601,17 @@ fn testHardState(term: u64, vote: u64, commit_index: u64) HardState {
 test "types: HardState.eql is reflexive and symmetric" {
     const a = HardState.empty;
     try std.testing.expect(a.eql(&a));
-    const b = testHardState(3, 2, 5);
+    const b = test_hard_state(3, 2, 5);
     try std.testing.expect(b.eql(&b));
     try std.testing.expect(HardState.empty.eql(&HardState.empty));
     try std.testing.expectEqual(a.eql(&b), b.eql(&a));
 }
 
 test "types: HardState.eql detects a single differing field" {
-    const base = testHardState(3, 2, 5);
-    const diff_term = testHardState(4, 2, 5);
-    const diff_vote = testHardState(3, 9, 5);
-    const diff_commit = testHardState(3, 2, 6);
+    const base = test_hard_state(3, 2, 5);
+    const diff_term = test_hard_state(4, 2, 5);
+    const diff_vote = test_hard_state(3, 9, 5);
+    const diff_commit = test_hard_state(3, 2, 6);
     try std.testing.expect(!base.eql(&diff_term));
     try std.testing.expect(!base.eql(&diff_vote));
     try std.testing.expect(!base.eql(&diff_commit));
@@ -636,81 +636,81 @@ test "types: HardState.eql seeded model against field-wise reference" {
     }
 }
 
-/// Test-only helper: cuts the `HardState.validateTransition(&.{ .previous = ..., .next = ... })`
+/// Test-only helper: cuts the `HardState.validate_transition(&.{ .previous = ..., .next = ... })`
 /// boilerplate down to one call per test case.
-fn testValidate(previous: HardState, next: HardState) Error!void {
-    return HardState.validateTransition(&.{ .previous = previous, .next = next });
+fn test_validate(previous: HardState, next: HardState) Error!void {
+    return HardState.validate_transition(&.{ .previous = previous, .next = next });
 }
 
-test "types: validateTransition allows a no-op persist" {
-    try testValidate(HardState.empty, HardState.empty);
+test "types: validate_transition allows a no-op persist" {
+    try test_validate(HardState.empty, HardState.empty);
 }
 
-test "types: validateTransition allows term advancing with a vote change" {
-    const previous = testHardState(1, 1, 0);
-    try testValidate(previous, testHardState(2, 0, 0)); // Vote reset to `.none`.
-    try testValidate(previous, testHardState(2, 2, 0)); // Vote changed to a new candidate.
+test "types: validate_transition allows term advancing with a vote change" {
+    const previous = test_hard_state(1, 1, 0);
+    try test_validate(previous, test_hard_state(2, 0, 0)); // Vote reset to `.none`.
+    try test_validate(previous, test_hard_state(2, 2, 0)); // Vote changed to a new candidate.
 }
 
-test "types: validateTransition allows first vote in a term and non-decreasing commit" {
-    const not_voted = testHardState(1, 0, 0);
-    const voted = testHardState(1, 3, 0);
-    try testValidate(not_voted, voted);
-    try testValidate(voted, testHardState(1, 3, 0)); // Commit stays equal.
-    try testValidate(voted, testHardState(1, 3, 1)); // Commit advances.
+test "types: validate_transition allows first vote in a term and non-decreasing commit" {
+    const not_voted = test_hard_state(1, 0, 0);
+    const voted = test_hard_state(1, 3, 0);
+    try test_validate(not_voted, voted);
+    try test_validate(voted, test_hard_state(1, 3, 0)); // Commit stays equal.
+    try test_validate(voted, test_hard_state(1, 3, 1)); // Commit advances.
 }
 
-test "types: validateTransition rejects a term regression" {
-    const previous = testHardState(2, 0, 0);
-    const result = testValidate(previous, testHardState(1, 0, 0));
+test "types: validate_transition rejects a term regression" {
+    const previous = test_hard_state(2, 0, 0);
+    const result = test_validate(previous, test_hard_state(1, 0, 0));
     try std.testing.expectError(error.InvariantTermRegressed, result);
 }
 
-test "types: validateTransition rejects a vote change within the same term" {
-    const previous = testHardState(1, 1, 0);
+test "types: validate_transition rejects a vote change within the same term" {
+    const previous = test_hard_state(1, 1, 0);
     try std.testing.expectError(
         error.InvariantVoteChanged,
-        testValidate(previous, testHardState(1, 2, 0)),
+        test_validate(previous, test_hard_state(1, 2, 0)),
     );
     try std.testing.expectError(
         error.InvariantVoteChanged,
-        testValidate(previous, testHardState(1, 0, 0)),
+        test_validate(previous, test_hard_state(1, 0, 0)),
     );
 }
 
-test "types: validateTransition rejects a commit regression" {
-    const previous = testHardState(1, 0, 5);
+test "types: validate_transition rejects a commit regression" {
+    const previous = test_hard_state(1, 0, 5);
     try std.testing.expectError(
         error.InvariantCommitRegressed,
-        testValidate(previous, testHardState(1, 0, 4)),
+        test_validate(previous, test_hard_state(1, 0, 4)),
     );
     try std.testing.expectError(
         error.InvariantCommitRegressed,
-        testValidate(previous, testHardState(2, 0, 4)),
+        test_validate(previous, test_hard_state(2, 0, 4)),
     );
 }
 
-test "types: validateTransition checks term before commit" {
-    const previous = testHardState(2, 0, 5);
-    const result = testValidate(previous, testHardState(1, 0, 1));
+test "types: validate_transition checks term before commit" {
+    const previous = test_hard_state(2, 0, 5);
+    const result = test_validate(previous, test_hard_state(1, 0, 1));
     try std.testing.expectError(error.InvariantTermRegressed, result);
 }
 
-test "types: validateTransition seeded model against a reference predicate" {
+test "types: validate_transition seeded model against a reference predicate" {
     var prng = std.Random.DefaultPrng.init(0xf00d_5eed);
     const random = prng.random();
     for (0..1000) |_| {
-        const previous = testHardState(
+        const previous = test_hard_state(
             random.intRangeAtMost(u64, 0, 5),
             random.intRangeAtMost(u64, 0, 3),
             random.intRangeAtMost(u64, 0, 5),
         );
-        const next = testHardState(
+        const next = test_hard_state(
             random.intRangeAtMost(u64, 0, 5),
             random.intRangeAtMost(u64, 0, 3),
             random.intRangeAtMost(u64, 0, 5),
         );
-        const result = testValidate(previous, next);
+        const result = test_validate(previous, next);
         const vote_changed = previous.vote != .none and next.vote != previous.vote;
         if (next.term.order(previous.term) == .lt) {
             try std.testing.expectError(error.InvariantTermRegressed, result);
@@ -782,7 +782,7 @@ test "types: MessageError is exhaustively switchable" {
 }
 
 /// Test-only helper: builds a `Header` from raw integers so test cases stay one line each.
-fn testHeader(term: u64, from: u64, to: u64) Header {
+fn test_header(term: u64, from: u64, to: u64) Header {
     return .{
         .protocol_version = protocol_version_current,
         .term = @enumFromInt(term),
@@ -816,7 +816,7 @@ test "types: every Message payload's field 0 is header: Header" {
 }
 
 test "types: Message.header returns each variant's header via one exhaustive switch" {
-    const head = testHeader(5, 1, 2);
+    const head = test_header(5, 1, 2);
     const snapshot_configuration: Configuration = .{
         .voters = &.{@as(NodeId, @enumFromInt(1))},
         .voters_outgoing = &.{},
@@ -856,13 +856,13 @@ test "types: Message.header returns each variant's header via one exhaustive swi
 
 test "types: Message.validate accepts a well-formed request_vote and pre_vote" {
     const request: Message = .{ .request_vote = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .last_log_index = @enumFromInt(10),
         .last_log_term = @enumFromInt(4),
     } };
     try request.validate(test_limits);
     const pre: Message = .{ .pre_vote = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .last_log_index = .zero,
         .last_log_term = .zero,
     } };
@@ -870,9 +870,9 @@ test "types: Message.validate accepts a well-formed request_vote and pre_vote" {
 }
 
 test "types: Message.validate accepts a well-formed append_entries with entries" {
-    const entries = [_]Entry{ testEntry(11, 5, .normal, "a"), testEntry(12, 5, .normal, "b") };
+    const entries = [_]Entry{ test_entry(11, 5, .normal, "a"), test_entry(12, 5, .normal, "b") };
     const message: Message = .{ .append_entries = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .prev_log_index = @enumFromInt(10),
         .prev_log_term = @enumFromInt(4),
         .leader_commit = @enumFromInt(9),
@@ -884,13 +884,13 @@ test "types: Message.validate accepts a well-formed append_entries with entries"
 
 test "types: Message.validate accepts an accepted and a rejected append_entries_response" {
     const accepted: Message = .{ .append_entries_response = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .round = 1,
         .outcome = .{ .accepted = @enumFromInt(12) },
     } };
     try accepted.validate(test_limits);
     const rejected: Message = .{ .append_entries_response = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .round = 1,
         .outcome = .{ .rejected = .{ .index = .zero, .term = .zero } },
     } };
@@ -904,7 +904,7 @@ test "types: Message.validate accepts a well-formed install_snapshot" {
         .learners = &.{},
     };
     const message: Message = .{ .install_snapshot = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .snapshot = .{ .index = @enumFromInt(9), .term = @enumFromInt(4), .data = "state" },
         .configuration = configuration,
     } };
@@ -913,7 +913,7 @@ test "types: Message.validate accepts a well-formed install_snapshot" {
 
 test "types: Message.validate rejects an unsupported protocol version" {
     var request: Message = .{ .request_vote = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .last_log_index = .zero,
         .last_log_term = .zero,
     } };
@@ -925,7 +925,7 @@ test "types: Message.validate rejects an unsupported protocol version" {
 
 test "types: Message.validate rejects a zero term" {
     const request: Message = .{ .request_vote = .{
-        .header = testHeader(0, 1, 2),
+        .header = test_header(0, 1, 2),
         .last_log_index = .zero,
         .last_log_term = .zero,
     } };
@@ -934,17 +934,17 @@ test "types: Message.validate rejects a zero term" {
 
 test "types: Message.validate rejects invalid node ids" {
     const no_from: Message = .{ .request_vote_response = .{
-        .header = testHeader(5, 0, 2),
+        .header = test_header(5, 0, 2),
         .granted = true,
     } };
     try std.testing.expectError(error.MessageNodeInvalid, no_from.validate(test_limits));
     const no_to: Message = .{ .request_vote_response = .{
-        .header = testHeader(5, 1, 0),
+        .header = test_header(5, 1, 0),
         .granted = true,
     } };
     try std.testing.expectError(error.MessageNodeInvalid, no_to.validate(test_limits));
     const self_message: Message = .{ .request_vote_response = .{
-        .header = testHeader(5, 1, 1),
+        .header = test_header(5, 1, 1),
         .granted = true,
     } };
     try std.testing.expectError(error.MessageNodeInvalid, self_message.validate(test_limits));
@@ -952,7 +952,7 @@ test "types: Message.validate rejects invalid node ids" {
 
 test "types: Message.validate rejects an inconsistent log position on request_vote" {
     const zero_index_nonzero_term: Message = .{ .request_vote = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .last_log_index = .zero,
         .last_log_term = @enumFromInt(1),
     } };
@@ -961,7 +961,7 @@ test "types: Message.validate rejects an inconsistent log position on request_vo
         zero_index_nonzero_term.validate(test_limits),
     );
     const term_above_header: Message = .{ .request_vote = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .last_log_index = @enumFromInt(1),
         .last_log_term = @enumFromInt(6),
     } };
@@ -972,9 +972,9 @@ test "types: Message.validate rejects an inconsistent log position on request_vo
 }
 
 test "types: Message.validate rejects non-contiguous append_entries" {
-    const entries = [_]Entry{testEntry(12, 5, .normal, "a")}; // Skips index 11.
+    const entries = [_]Entry{test_entry(12, 5, .normal, "a")}; // Skips index 11.
     const message: Message = .{ .append_entries = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .prev_log_index = @enumFromInt(10),
         .prev_log_term = @enumFromInt(4),
         .leader_commit = .zero,
@@ -986,9 +986,9 @@ test "types: Message.validate rejects non-contiguous append_entries" {
 
 test "types: Message.validate rejects entries at prev_log_index == maxInt without panicking" {
     // Regression: previous_index.next() must never be called on peer-supplied maxInt data.
-    const entries = [_]Entry{testEntry(std.math.maxInt(u64), 5, .normal, "a")};
+    const entries = [_]Entry{test_entry(std.math.maxInt(u64), 5, .normal, "a")};
     const message: Message = .{ .append_entries = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .prev_log_index = @enumFromInt(std.math.maxInt(u64) - 1),
         .prev_log_term = @enumFromInt(4),
         .leader_commit = .zero,
@@ -998,11 +998,11 @@ test "types: Message.validate rejects entries at prev_log_index == maxInt withou
     try message.validate(test_limits); // maxInt(u64) - 1 -> maxInt(u64) is a valid step.
 
     const two_entries = [_]Entry{
-        testEntry(std.math.maxInt(u64), 5, .normal, "a"),
-        testEntry(std.math.maxInt(u64), 5, .normal, "b"), // Would overflow .next() on the retry.
+        test_entry(std.math.maxInt(u64), 5, .normal, "a"),
+        test_entry(std.math.maxInt(u64), 5, .normal, "b"), // Would overflow .next() on the retry.
     };
     const overflow_message: Message = .{ .append_entries = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .prev_log_index = @enumFromInt(std.math.maxInt(u64) - 1),
         .prev_log_term = @enumFromInt(4),
         .leader_commit = .zero,
@@ -1017,11 +1017,11 @@ test "types: Message.validate rejects entries at prev_log_index == maxInt withou
 
 test "types: Message.validate rejects an out-of-range entry term" {
     const decreasing = [_]Entry{
-        testEntry(11, 5, .normal, "a"),
-        testEntry(12, 4, .normal, "b"), // Term regresses within the batch.
+        test_entry(11, 5, .normal, "a"),
+        test_entry(12, 4, .normal, "b"), // Term regresses within the batch.
     };
     const decreasing_message: Message = .{ .append_entries = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .prev_log_index = @enumFromInt(10),
         .prev_log_term = @enumFromInt(4),
         .leader_commit = .zero,
@@ -1033,9 +1033,9 @@ test "types: Message.validate rejects an out-of-range entry term" {
         decreasing_message.validate(test_limits),
     );
 
-    const above_header = [_]Entry{testEntry(11, 6, .normal, "a")}; // header.term is 5.
+    const above_header = [_]Entry{test_entry(11, 6, .normal, "a")}; // header.term is 5.
     const above_message: Message = .{ .append_entries = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .prev_log_index = @enumFromInt(10),
         .prev_log_term = @enumFromInt(4),
         .leader_commit = .zero,
@@ -1047,9 +1047,9 @@ test "types: Message.validate rejects an out-of-range entry term" {
 
 test "types: Message.validate rejects append_entries over the entries or bytes limit" {
     var buf: [8]Entry = undefined;
-    for (&buf, 0..) |*entry, i| entry.* = testEntry(11 + i, 5, .normal, "x");
+    for (&buf, 0..) |*entry, i| entry.* = test_entry(11 + i, 5, .normal, "x");
     const over_count: Message = .{ .append_entries = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .prev_log_index = @enumFromInt(10),
         .prev_log_term = @enumFromInt(4),
         .leader_commit = .zero,
@@ -1063,9 +1063,9 @@ test "types: Message.validate rejects append_entries over the entries or bytes l
     };
     try std.testing.expectError(error.MessageTooLarge, over_count.validate(tight_limits));
 
-    const big_entry = [_]Entry{testEntry(11, 5, .normal, "too big")};
+    const big_entry = [_]Entry{test_entry(11, 5, .normal, "too big")};
     const over_bytes: Message = .{ .append_entries = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .prev_log_index = @enumFromInt(10),
         .prev_log_term = @enumFromInt(4),
         .leader_commit = .zero,
@@ -1082,14 +1082,14 @@ test "types: Message.validate rejects append_entries over the entries or bytes l
 
 test "types: Message.validate rejects an invalid append_entries_response conflict" {
     const bad_shape: Message = .{ .append_entries_response = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .round = 1,
         .outcome = .{ .rejected = .{ .index = .zero, .term = @enumFromInt(1) } },
     } };
     try std.testing.expectError(error.MessageConflictInvalid, bad_shape.validate(test_limits));
 
     const term_above_header: Message = .{ .append_entries_response = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .round = 1,
         .outcome = .{ .rejected = .{ .index = @enumFromInt(1), .term = @enumFromInt(6) } },
     } };
@@ -1106,14 +1106,14 @@ test "types: Message.validate rejects an invalid install_snapshot" {
         .learners = &.{},
     };
     const zero_index: Message = .{ .install_snapshot = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .snapshot = .{ .index = .zero, .term = @enumFromInt(4), .data = "" },
         .configuration = configuration,
     } };
     try std.testing.expectError(error.MessageSnapshotInvalid, zero_index.validate(test_limits));
 
     const term_above_header: Message = .{ .install_snapshot = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .snapshot = .{ .index = @enumFromInt(9), .term = @enumFromInt(6), .data = "" },
         .configuration = configuration,
     } };
@@ -1128,7 +1128,7 @@ test "types: Message.validate rejects an invalid install_snapshot" {
         .learners = &.{},
     };
     const empty_voters: Message = .{ .install_snapshot = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .snapshot = .{ .index = @enumFromInt(9), .term = @enumFromInt(4), .data = "" },
         .configuration = bad_configuration,
     } };
@@ -1142,7 +1142,7 @@ test "types: Message.validate rejects an oversized snapshot" {
         .learners = &.{},
     };
     const message: Message = .{ .install_snapshot = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .snapshot = .{ .index = @enumFromInt(9), .term = @enumFromInt(4), .data = "too big" },
         .configuration = configuration,
     } };
@@ -1155,9 +1155,9 @@ test "types: Message.validate rejects an oversized snapshot" {
 }
 
 test "types: AppendRequest.entries and SnapshotRequest.snapshot.data are borrowed" {
-    const entries = [_]Entry{testEntry(11, 5, .normal, "a")};
+    const entries = [_]Entry{test_entry(11, 5, .normal, "a")};
     const append: AppendRequest = .{
-        .header = testHeader(5, 1, 2),
+        .header = test_header(5, 1, 2),
         .prev_log_index = @enumFromInt(10),
         .prev_log_term = @enumFromInt(4),
         .leader_commit = .zero,
