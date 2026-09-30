@@ -75,7 +75,7 @@ becomes a MAJOR-bump negotiation the moment something does.
       function lengths, first honest `tidy` numbers; flip README's rows for those four modules
       from *planned* to *implemented*. *Verify:* `tidy` green; new table in `STATE.md`.
       `blocked_by: none`
-- [ ] **Release v0.3.0.** MINOR bump in `build.zig.zon` (item 1 propagates it to
+- [x] **Release v0.3.0.** MINOR bump in `build.zig.zon` (item 1 propagates it to
       `synod.version`), CHANGELOG section, annotated tag, GitHub release. Gate per `REALM.md`:
       `zig build test` 0 failures, 6 cross-compile targets green, 0 open `bug` issues. *Verify:*
       `gh release view v0.3.0` succeeds and `zig fetch <v0.3.0 tarball>` resolves.
