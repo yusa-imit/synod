@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `build.zig`, `tools/tidy.zig`, `tools/tidy_test.zig`, `bench/main.zig`: camelCase functions
+  renamed to snake_case per Tiger Style §3.6. No library API change.
+
 ## [0.3.0] - 2026-10-01
 
 ### Changed

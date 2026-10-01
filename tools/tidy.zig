@@ -68,7 +68,7 @@ pub const BaselineEntry = struct {
 /// Postcondition: one `LineViolation` per 1-indexed line whose byte length exceeds
 /// `line_length_max`; a source with no offending line returns an empty (but allocated,
 /// caller-freed) slice.
-pub fn checkLineLengths(
+pub fn check_line_lengths(
     gpa: Allocator,
     path: []const u8,
     source: []const u8,
@@ -101,7 +101,7 @@ pub fn checkLineLengths(
 /// Postcondition: one `BaselineEntry` per non-blank `path:function:lines` line, in order;
 /// blank lines are skipped. Returns `error.InvalidBaseline` for a line missing the
 /// two-colon `path:function:lines` shape or with a non-numeric `lines` field.
-pub fn parseBaseline(
+pub fn parse_baseline(
     gpa: Allocator,
     text: []const u8,
 ) (Allocator.Error || error{InvalidBaseline})![]BaselineEntry {
@@ -115,7 +115,7 @@ pub fn parseBaseline(
     while (lines.next()) |line| {
         if (line.len == 0) continue;
         assert(line.len > 0);
-        const entry = try parseBaselineLine(line);
+        const entry = try parse_baseline_line(line);
         try entries.append(gpa, entry);
     }
 
@@ -124,7 +124,7 @@ pub fn parseBaseline(
 }
 
 /// Parses one non-blank `path:function:lines` line into a `BaselineEntry` sub-slicing `line`.
-fn parseBaselineLine(line: []const u8) error{InvalidBaseline}!BaselineEntry {
+fn parse_baseline_line(line: []const u8) error{InvalidBaseline}!BaselineEntry {
     assert(line.len > 0);
 
     const first_colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidBaseline;
@@ -149,7 +149,7 @@ fn parseBaselineLine(line: []const u8) error{InvalidBaseline}!BaselineEntry {
 /// — exceeds `function_lines_max`. A function over the limit is excused only if `baseline`
 /// holds an entry matching `path` and the function's name whose `lines_max` (clamped to
 /// `function_lines_red_zone_max`) is at least the function's measured line count.
-pub fn checkFunctionLengths(
+pub fn check_function_lengths(
     gpa: Allocator,
     path: []const u8,
     source: []const u8,
@@ -167,10 +167,10 @@ pub fn checkFunctionLengths(
         const line_end = std.mem.indexOfScalarPos(u8, source, offset, '\n') orelse source.len;
         const line = source[offset..line_end];
         const trimmed = std.mem.trimStart(u8, line, " \t");
-        if (functionNameAt(trimmed)) |name| {
-            if (findFunctionEnd(source, offset, line_number)) |end| {
+        if (function_name_at(trimmed)) |name| {
+            if (find_function_end(source, offset, line_number)) |end| {
                 const lines_count = end.line - line_number + 1;
-                const allowed = allowedFunctionLines(baseline, path, name);
+                const allowed = allowed_function_lines(baseline, path, name);
                 if (lines_count > allowed) {
                     try violations.append(gpa, .{
                         .path = path,
@@ -192,7 +192,7 @@ pub fn checkFunctionLengths(
 
 /// Returns the function name starting at `trimmed` (a `pub fn `/`fn `-prefixed line with
 /// leading whitespace already stripped), or `null` if the line does not declare a function.
-fn functionNameAt(trimmed: []const u8) ?[]const u8 {
+fn function_name_at(trimmed: []const u8) ?[]const u8 {
     const prefix_len: usize = if (std.mem.startsWith(u8, trimmed, "pub fn "))
         7
     else if (std.mem.startsWith(u8, trimmed, "fn "))
@@ -213,7 +213,7 @@ const FunctionEnd = struct { line: u32 };
 /// Scans forward from `decl_offset` (the byte offset of the declaration line's start) for the
 /// first `{`, then tracks brace depth to find its match. Returns `null` for malformed input
 /// (no opening brace, or more closes than opens) rather than crashing on bad source text.
-fn findFunctionEnd(source: []const u8, decl_offset: usize, decl_line: u32) ?FunctionEnd {
+fn find_function_end(source: []const u8, decl_offset: usize, decl_line: u32) ?FunctionEnd {
     assert(decl_offset <= source.len);
     assert(decl_line >= 1);
 
@@ -240,7 +240,7 @@ fn findFunctionEnd(source: []const u8, decl_offset: usize, decl_line: u32) ?Func
 /// Returns the maximum line count `name` (declared in `path`) may reach without a violation:
 /// the matching baseline entry's `lines_max`, clamped to `function_lines_red_zone_max`, or
 /// `function_lines_max` when no entry matches.
-fn allowedFunctionLines(baseline: []const BaselineEntry, path: []const u8, name: []const u8) u32 {
+fn allowed_function_lines(baseline: []const BaselineEntry, path: []const u8, name: []const u8) u32 {
     for (baseline) |entry| {
         if (std.mem.eql(u8, entry.path, path) and std.mem.eql(u8, entry.name, name)) {
             return @min(entry.lines_max, function_lines_red_zone_max);
@@ -282,7 +282,7 @@ pub const core_purity_files = [_][]const u8{
 
 /// True if `path` is one of the exact `core_purity_files` paths (a whole-path match, not a
 /// suffix or substring match — `src/sub/raft.zig` and `raft.zig` are both `false`).
-pub fn isCorePurityFile(path: []const u8) bool {
+pub fn is_core_purity_file(path: []const u8) bool {
     assert(path.len > 0);
     comptime assert(core_purity_files.len == 5);
 
@@ -295,7 +295,7 @@ pub fn isCorePurityFile(path: []const u8) bool {
 /// Precondition: `path` and `source` outlive the returned slice.
 /// Postcondition: one `CatchUnreachableViolation` per line containing `catch unreachable`
 /// that has no `// proof:` comment on that same line or on the line immediately before it.
-pub fn checkCatchUnreachable(
+pub fn check_catch_unreachable(
     gpa: Allocator,
     path: []const u8,
     source: []const u8,
@@ -327,7 +327,7 @@ pub fn checkCatchUnreachable(
 
 /// Precondition: `path`, `source`, and `pattern` outlive the returned slice.
 /// Postcondition: one `BannedPatternViolation` per line containing `pattern` as a substring.
-pub fn checkBannedPattern(
+pub fn check_banned_pattern(
     gpa: Allocator,
     path: []const u8,
     source: []const u8,
@@ -352,20 +352,20 @@ pub fn checkBannedPattern(
 }
 
 /// True if `c` may appear inside a Zig identifier.
-fn isIdentChar(c: u8) bool {
+fn is_ident_char(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';
 }
 
 /// True if `haystack` contains `word` as a whole identifier token, not as a substring of a
 /// longer identifier (so `usize` does not match `my_usize_thing`).
-fn containsWord(haystack: []const u8, word: []const u8) bool {
+fn contains_word(haystack: []const u8, word: []const u8) bool {
     assert(word.len > 0);
 
     var from: usize = 0;
     while (std.mem.indexOfPos(u8, haystack, from, word)) |at| {
-        const before_ok = at == 0 or !isIdentChar(haystack[at - 1]);
+        const before_ok = at == 0 or !is_ident_char(haystack[at - 1]);
         const after = at + word.len;
-        const after_ok = after >= haystack.len or !isIdentChar(haystack[after]);
+        const after_ok = after >= haystack.len or !is_ident_char(haystack[after]);
         if (before_ok and after_ok) return true;
         from = at + 1;
     }
@@ -375,8 +375,8 @@ fn containsWord(haystack: []const u8, word: []const u8) bool {
 /// Returns whether `after_eq` starts with a struct-or-union declaration keyword, optionally
 /// preceded by the `extern` or `packed` layout modifier (e.g. `extern struct`, `packed union`).
 /// An `extern`/`packed` struct is exactly the shape a wire type needs for byte-stable layout, so
-/// it must be recognised here or `checkWireUsize` silently skips it (ADR-004).
-fn startsWithWireDeclKeyword(after_eq: []const u8) bool {
+/// it must be recognised here or `check_wire_usize` silently skips it (ADR-004).
+fn starts_with_wire_decl_keyword(after_eq: []const u8) bool {
     if (std.mem.startsWith(u8, after_eq, "struct")) return true;
     if (std.mem.startsWith(u8, after_eq, "union")) return true;
     for ([_][]const u8{ "extern", "packed" }) |modifier| {
@@ -392,21 +392,21 @@ fn startsWithWireDeclKeyword(after_eq: []const u8) bool {
 /// after `from` that is (across any run of spaces, tabs, or newlines) followed by `=` and
 /// then a wire-decl keyword (`struct`/`union`, optionally `extern`/`packed`-qualified), or
 /// `null` if none remains.
-fn findWireDeclEnd(source: []const u8, from: usize, name: []const u8) ?usize {
+fn find_wire_decl_end(source: []const u8, from: usize, name: []const u8) ?usize {
     assert(name.len > 0);
     assert(from <= source.len);
 
     var search_from = from;
     while (std.mem.indexOfPos(u8, source, search_from, name)) |at| {
         search_from = at + 1;
-        const before_ok = at == 0 or !isIdentChar(source[at - 1]);
-        const after_ok = at + name.len < source.len and !isIdentChar(source[at + name.len]);
+        const before_ok = at == 0 or !is_ident_char(source[at - 1]);
+        const after_ok = at + name.len < source.len and !is_ident_char(source[at + name.len]);
         if (!before_ok or !after_ok) continue;
 
         const after_name = std.mem.trimStart(u8, source[at + name.len ..], " \t\r\n");
         if (!std.mem.startsWith(u8, after_name, "=")) continue;
         const after_eq = std.mem.trimStart(u8, after_name[1..], " \t\r\n");
-        if (!startsWithWireDeclKeyword(after_eq)) continue;
+        if (!starts_with_wire_decl_keyword(after_eq)) continue;
         return at + name.len;
     }
     return null;
@@ -416,7 +416,7 @@ fn findWireDeclEnd(source: []const u8, from: usize, name: []const u8) ?usize {
 /// Postcondition: one `WireUsizeViolation` per line inside a `pub const <Name> = struct {`
 /// or `= union(enum) {` block (for each `Name` in `wire_struct_names`) that contains the
 /// whole word `usize`. Declaration and closing-brace lines are excluded.
-pub fn checkWireUsize(
+pub fn check_wire_usize(
     gpa: Allocator,
     path: []const u8,
     source: []const u8,
@@ -430,10 +430,10 @@ pub fn checkWireUsize(
 
     for (wire_struct_names) |type_name| {
         var from: usize = 0;
-        while (findWireDeclEnd(source, from, type_name)) |decl_end| {
+        while (find_wire_decl_end(source, from, type_name)) |decl_end| {
             const open = std.mem.indexOfScalarPos(u8, source, decl_end, '{') orelse break;
-            const decl_line = lineNumberAt(source, open);
-            const end = findFunctionEnd(source, decl_end, decl_line) orelse break;
+            const decl_line = line_number_at(source, open);
+            const end = find_function_end(source, decl_end, decl_line) orelse break;
             assert(end.line >= decl_line);
             from = open + 1;
 
@@ -449,7 +449,7 @@ pub fn checkWireUsize(
                 const line_end = std.mem.indexOfScalarPos(u8, source, offset, '\n') orelse
                     source.len;
                 const line = source[offset..line_end];
-                if (containsWord(line, "usize")) {
+                if (contains_word(line, "usize")) {
                     try violations.append(gpa, .{
                         .path = path,
                         .line = line_number,
@@ -467,7 +467,7 @@ pub fn checkWireUsize(
 }
 
 /// Returns the 1-indexed line number containing byte `offset` of `source`.
-fn lineNumberAt(source: []const u8, offset: usize) u32 {
+fn line_number_at(source: []const u8, offset: usize) u32 {
     assert(offset <= source.len);
     const number = @as(u32, @intCast(std.mem.count(u8, source[0..offset], "\n"))) + 1;
     assert(number >= 1);
@@ -475,7 +475,7 @@ fn lineNumberAt(source: []const u8, offset: usize) u32 {
 }
 
 /// True if `source`'s very first line starts with a `//!` module doc comment.
-pub fn hasModuleHeader(source: []const u8) bool {
+pub fn has_module_header(source: []const u8) bool {
     const first_line_end = std.mem.indexOfScalar(u8, source, '\n') orelse source.len;
     assert(first_line_end <= source.len);
     const first_line = source[0..first_line_end];
@@ -486,7 +486,7 @@ pub fn hasModuleHeader(source: []const u8) bool {
 
 /// Reads `sub_path` under `dir` and returns its contents, or an empty slice if the file does
 /// not exist. Precondition: `gpa` outlives the returned slice; the caller frees it.
-fn readOptionalFile(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) ![]u8 {
+fn read_optional_file(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) ![]u8 {
     assert(sub_path.len > 0);
 
     const limit: Io.Limit = .limited(file_bytes_max);
@@ -501,7 +501,7 @@ fn readOptionalFile(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) !
 
 /// Prints every size violation (line-length, function-length) to stderr. Returns whether any
 /// was printed.
-fn reportSizeViolations(
+fn report_size_violations(
     io: Io,
     path: []const u8,
     line_violations: []const LineViolation,
@@ -529,7 +529,7 @@ fn reportSizeViolations(
 
 /// Prints every ban-list violation (catch unreachable, banned pattern, `std.Io` core-purity,
 /// wire usize, missing module header) to stderr. Returns whether any was printed.
-fn reportBanViolations(
+fn report_ban_violations(
     io: Io,
     path: []const u8,
     catch_violations: []const CatchUnreachableViolation,
@@ -583,7 +583,7 @@ fn reportBanViolations(
 /// Checks one file under `src_dir` against the size rules and the ban list (catch unreachable,
 /// std.debug.print, std.time.*, std.Io in core-purity files, usize in wire structs, missing
 /// `//!` header) and reports its violations. Returns whether it had any.
-fn checkFile(
+fn check_file(
     gpa: Allocator,
     io: Io,
     src_dir: Io.Dir,
@@ -597,35 +597,35 @@ fn checkFile(
     const source = try src_dir.readFileAlloc(io, rel_path, gpa, .limited(file_bytes_max));
     defer gpa.free(source);
 
-    const line_violations = try checkLineLengths(gpa, path, source);
+    const line_violations = try check_line_lengths(gpa, path, source);
     defer gpa.free(line_violations);
-    const fn_violations = try checkFunctionLengths(gpa, path, source, baseline);
+    const fn_violations = try check_function_lengths(gpa, path, source, baseline);
     defer gpa.free(fn_violations);
-    const size_bad = reportSizeViolations(io, path, line_violations, fn_violations);
+    const size_bad = report_size_violations(io, path, line_violations, fn_violations);
 
-    const catch_violations = try checkCatchUnreachable(gpa, path, source);
+    const catch_violations = try check_catch_unreachable(gpa, path, source);
     defer gpa.free(catch_violations);
-    const debug_print_violations = try checkBannedPattern(gpa, path, source, "std.debug.print");
+    const debug_print_violations = try check_banned_pattern(gpa, path, source, "std.debug.print");
     defer gpa.free(debug_print_violations);
-    const time_violations = try checkBannedPattern(gpa, path, source, "std.time.");
+    const time_violations = try check_banned_pattern(gpa, path, source, "std.time.");
     defer gpa.free(time_violations);
     // ADR-002: `std.Io` is only banned inside the five core-purity files, so the check itself
-    // (and the allocation it makes) is conditional. `checkBannedPattern` always allocates via
+    // (and the allocation it makes) is conditional. `check_banned_pattern` always allocates via
     // `toOwnedSlice`, even for zero violations, so the exempt-file branch uses a compile-time
     // empty slice instead of calling it — and the matching `gpa.free` below is gated on the
-    // same `is_core_purity_file` so it never frees a slice `gpa` did not allocate.
-    const is_core_purity_file = isCorePurityFile(path);
-    const io_purity_violations = if (is_core_purity_file)
-        try checkBannedPattern(gpa, path, source, "std.Io")
+    // same `is_core` flag so it never frees a slice `gpa` did not allocate.
+    const is_core = is_core_purity_file(path);
+    const io_purity_violations = if (is_core)
+        try check_banned_pattern(gpa, path, source, "std.Io")
     else
         &[_]BannedPatternViolation{};
-    defer if (is_core_purity_file) gpa.free(io_purity_violations);
-    if (!is_core_purity_file) assert(io_purity_violations.len == 0);
+    defer if (is_core) gpa.free(io_purity_violations);
+    if (!is_core) assert(io_purity_violations.len == 0);
 
-    const wire_violations = try checkWireUsize(gpa, path, source);
+    const wire_violations = try check_wire_usize(gpa, path, source);
     defer gpa.free(wire_violations);
-    const missing_header = !hasModuleHeader(source);
-    const ban_bad = reportBanViolations(
+    const missing_header = !has_module_header(source);
+    const ban_bad = report_ban_violations(
         io,
         path,
         catch_violations,
@@ -644,7 +644,7 @@ fn checkFile(
 /// which are not `src/` core files but still contain literal ban-list substrings in their own
 /// string fixtures/messages (see the file doc comment), so running the ban list over them
 /// would false-positive. Returns whether the file had any violation.
-pub fn checkFileSizeOnly(
+pub fn check_file_size_only(
     gpa: Allocator,
     io: Io,
     dir: Io.Dir,
@@ -659,13 +659,13 @@ pub fn checkFileSizeOnly(
     defer gpa.free(source);
     assert(source.len <= file_bytes_max);
 
-    const line_violations = try checkLineLengths(gpa, path, source);
+    const line_violations = try check_line_lengths(gpa, path, source);
     defer gpa.free(line_violations);
-    const fn_violations = try checkFunctionLengths(gpa, path, source, baseline);
+    const fn_violations = try check_function_lengths(gpa, path, source, baseline);
     defer gpa.free(fn_violations);
-    const size_bad = reportSizeViolations(io, path, line_violations, fn_violations);
+    const size_bad = report_size_violations(io, path, line_violations, fn_violations);
 
-    const missing_header = !hasModuleHeader(source);
+    const missing_header = !has_module_header(source);
     if (missing_header) {
         const stderr = Io.File.stderr();
         var buf: [512]u8 = undefined;
@@ -691,17 +691,17 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
-    const baseline_text = try readOptionalFile(gpa, io, Io.Dir.cwd(), "tools/tidy_baseline.txt");
+    const baseline_text = try read_optional_file(gpa, io, Io.Dir.cwd(), "tools/tidy_baseline.txt");
     defer gpa.free(baseline_text);
 
-    const baseline = try parseBaseline(gpa, baseline_text);
+    const baseline = try parse_baseline(gpa, baseline_text);
     defer gpa.free(baseline);
 
     var files_seen: u32 = 0;
     assert(files_seen <= files_max);
     files_seen += 1;
     if (files_seen == files_max) return error.TooManyFiles;
-    var had_violation = try checkFileSizeOnly(
+    var had_violation = try check_file_size_only(
         gpa,
         io,
         Io.Dir.cwd(),
@@ -726,7 +726,7 @@ pub fn main(init: std.process.Init) !void {
         const path = try std.fmt.allocPrint(gpa, "src/{s}", .{entry.path});
         defer gpa.free(path);
 
-        if (try checkFile(gpa, io, src_dir, entry.path, path, baseline)) had_violation = true;
+        if (try check_file(gpa, io, src_dir, entry.path, path, baseline)) had_violation = true;
     }
 
     var tools_dir = try Io.Dir.cwd().openDir(io, "tools", .{ .iterate = true });
@@ -745,7 +745,7 @@ pub fn main(init: std.process.Init) !void {
         const path = try std.fmt.allocPrint(gpa, "tools/{s}", .{entry.path});
         defer gpa.free(path);
 
-        if (try checkFileSizeOnly(gpa, io, tools_dir, entry.path, path, baseline)) {
+        if (try check_file_size_only(gpa, io, tools_dir, entry.path, path, baseline)) {
             had_violation = true;
         }
     }
