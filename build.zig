@@ -15,32 +15,32 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Public library module — consumers `@import("synod")`
-    const mod = addLibraryModule(b, target);
+    const mod = add_library_module(b, target);
 
     // CLI executable (diagnostics, version, small utilities)
-    const exe = addCliExecutable(b, mod, target, optimize);
-    addRunStep(b, exe);
+    const exe = add_cli_executable(b, mod, target, optimize);
+    add_run_step(b, exe);
 
     // Tests
-    const tests = addTestStep(b, mod, exe);
+    const tests = add_test_step(b, mod, exe);
 
     // Tidy — Tiger Style size-floor checker (line length, function length).
-    addTidyStep(b, tests.step);
+    add_tidy_step(b, tests.step);
 
     // Benchmarks
-    addBenchStep(b, mod, target, tests.step);
+    add_bench_step(b, mod, target, tests.step);
 
     // Docs
-    addDocsStep(b, tests.mod_tests);
+    add_docs_step(b, tests.mod_tests);
 }
 
-/// Handles `addTestStep` wires up, passed on to the steps hanging off `test`.
+/// Handles `add_test_step` wires up, passed on to the steps hanging off `test`.
 const TestSteps = struct {
     step: *std.Build.Step,
     mod_tests: *std.Build.Step.Compile,
 };
 
-fn addLibraryModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+fn add_library_module(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
     // The version comes from build.zig.zon so `synod.version` cannot drift from the manifest.
     const options = b.addOptions();
     options.addOption([]const u8, "version", manifest.version);
@@ -53,7 +53,7 @@ fn addLibraryModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.
     });
 }
 
-fn addCliExecutable(
+fn add_cli_executable(
     b: *std.Build,
     mod: *std.Build.Module,
     target: std.Build.ResolvedTarget,
@@ -74,7 +74,7 @@ fn addCliExecutable(
     return exe;
 }
 
-fn addRunStep(b: *std.Build, exe: *std.Build.Step.Compile) void {
+fn add_run_step(b: *std.Build, exe: *std.Build.Step.Compile) void {
     const run_step = b.step("run", "Run the CLI");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
@@ -82,7 +82,7 @@ fn addRunStep(b: *std.Build, exe: *std.Build.Step.Compile) void {
     if (b.args) |args| run_cmd.addArgs(args);
 }
 
-fn addTestStep(b: *std.Build, mod: *std.Build.Module, exe: *std.Build.Step.Compile) TestSteps {
+fn add_test_step(b: *std.Build, mod: *std.Build.Module, exe: *std.Build.Step.Compile) TestSteps {
     const mod_tests = b.addTest(.{ .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
@@ -93,7 +93,7 @@ fn addTestStep(b: *std.Build, mod: *std.Build.Module, exe: *std.Build.Step.Compi
     return .{ .step = test_step, .mod_tests = mod_tests };
 }
 
-fn addTidyStep(b: *std.Build, test_step: *std.Build.Step) void {
+fn add_tidy_step(b: *std.Build, test_step: *std.Build.Step) void {
     const tidy_exe = b.addExecutable(.{
         .name = "tidy",
         .root_module = b.createModule(.{
@@ -112,7 +112,7 @@ fn addTidyStep(b: *std.Build, test_step: *std.Build.Step) void {
     test_step.dependOn(&run_tidy_tests.step);
 }
 
-fn addBenchStep(
+fn add_bench_step(
     b: *std.Build,
     mod: *std.Build.Module,
     target: std.Build.ResolvedTarget,
@@ -139,7 +139,7 @@ fn addBenchStep(
     test_step.dependOn(&run_bench_tests.step);
 }
 
-fn addDocsStep(b: *std.Build, mod_tests: *std.Build.Step.Compile) void {
+fn add_docs_step(b: *std.Build, mod_tests: *std.Build.Step.Compile) void {
     const docs = b.addInstallDirectory(.{
         .source_dir = mod_tests.getEmittedDocs(),
         .install_dir = .prefix,

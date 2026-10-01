@@ -17,7 +17,7 @@ const benches = [_]Bench{
     .{ .name = "noop", .run = noop },
 };
 
-fn matchesFilter(name: []const u8, filter: ?[]const u8) bool {
+fn matches_filter(name: []const u8, filter: ?[]const u8) bool {
     assert(name.len > 0);
     const f = filter orelse return true;
     const idx = std.mem.find(u8, name, f);
@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
     defer out.flush() catch {};
 
     for (benches) |b| {
-        if (!matchesFilter(b.name, filter)) continue;
+        if (!matches_filter(b.name, filter)) continue;
         const start = Io.Clock.Timestamp.now(init.io, .awake);
         const ops = try b.run(gpa);
         const elapsed = start.untilNow(init.io);
@@ -51,18 +51,18 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-test "matchesFilter: no filter matches every benchmark" {
-    try std.testing.expect(matchesFilter("noop", null));
+test "matches_filter: no filter matches every benchmark" {
+    try std.testing.expect(matches_filter("noop", null));
 }
 
-test "matchesFilter: substring filter matches" {
-    try std.testing.expect(matchesFilter("noop", "no"));
+test "matches_filter: substring filter matches" {
+    try std.testing.expect(matches_filter("noop", "no"));
 }
 
-test "matchesFilter: non-matching filter excludes the benchmark" {
-    try std.testing.expect(!matchesFilter("noop", "xyz"));
+test "matches_filter: non-matching filter excludes the benchmark" {
+    try std.testing.expect(!matches_filter("noop", "xyz"));
 }
 
-test "matchesFilter: empty-string filter matches everything" {
-    try std.testing.expect(matchesFilter("noop", ""));
+test "matches_filter: empty-string filter matches everything" {
+    try std.testing.expect(matches_filter("noop", ""));
 }
