@@ -53,17 +53,17 @@ fn node(value: u64) NodeId {
     return @enumFromInt(value);
 }
 
-fn testEntry(index: u64, term_value: u64) Entry {
+fn test_entry(index: u64, term_value: u64) Entry {
     return .{ .index = idx(index), .term = term(term_value), .kind = .normal, .data = "" };
 }
 
-fn testHeader(from: u64, to: u64) Header {
+fn test_header(from: u64, to: u64) Header {
     return .{ .protocol_version = 1, .term = term(3), .from = node(from), .to = node(to) };
 }
 
-fn testVote(from: u64, to: u64) Message {
+fn test_vote(from: u64, to: u64) Message {
     return .{ .request_vote = .{
-        .header = testHeader(from, to),
+        .header = test_header(from, to),
         .last_log_index = idx(7),
         .last_log_term = term(2),
     } };
@@ -83,7 +83,7 @@ test "interfaces: every interface is exactly two machine words" {
     }
 }
 
-fn expectVtableFields(comptime X: type, comptime expected: []const []const u8) !void {
+fn expect_vtable_fields(comptime X: type, comptime expected: []const []const u8) !void {
     const names = comptime std.meta.fieldNames(X.VTable);
     try testing.expectEqual(expected.len, names.len);
     inline for (expected, 0..) |name, i| {
@@ -96,11 +96,11 @@ fn expectVtableFields(comptime X: type, comptime expected: []const []const u8) !
 }
 
 test "interfaces: vtable fields are snake_case and one per method" {
-    try expectVtableFields(Transport, &.{"send"});
-    try expectVtableFields(Clock, &.{"now_ms"});
-    try expectVtableFields(Rng, &.{"next_u64"});
-    try expectVtableFields(StateMachine, &.{ "apply", "snapshot", "restore" });
-    try expectVtableFields(LogStore, &.{
+    try expect_vtable_fields(Transport, &.{"send"});
+    try expect_vtable_fields(Clock, &.{"now_ms"});
+    try expect_vtable_fields(Rng, &.{"next_u64"});
+    try expect_vtable_fields(StateMachine, &.{ "apply", "snapshot", "restore" });
+    try expect_vtable_fields(LogStore, &.{
         "append",        "truncate",        "get",
         "last_index",    "save_hard_state", "load_hard_state",
         "save_snapshot", "load_snapshot",   "sync",
@@ -171,7 +171,7 @@ const Recorder = struct {
 test "transport: send dispatches to the fixture with the destination from the header" {
     var recorder: Recorder = .{};
     const transport = Transport.init(&recorder);
-    const message = testVote(1, 2);
+    const message = test_vote(1, 2);
 
     transport.send(&message);
 
@@ -185,9 +185,9 @@ test "transport: send dispatches to the fixture with the destination from the he
 test "transport: sends reach the fixture in call order" {
     var recorder: Recorder = .{};
     const transport = Transport.init(&recorder);
-    const first = testVote(1, 2);
-    const second = testVote(1, 3);
-    const third = testVote(1, 4);
+    const first = test_vote(1, 2);
+    const second = test_vote(1, 3);
+    const third = test_vote(1, 4);
 
     transport.send(&first);
     transport.send(&second);
@@ -205,10 +205,10 @@ test "transport: borrowed entry slices reach the impl unchanged and are not copi
     const transport = Transport.init(&recorder);
     const entries = try testing.allocator.alloc(Entry, 2);
     defer testing.allocator.free(entries);
-    entries[0] = testEntry(5, 2);
-    entries[1] = testEntry(6, 2);
+    entries[0] = test_entry(5, 2);
+    entries[1] = test_entry(6, 2);
     const message: Message = .{ .append_entries = .{
-        .header = testHeader(9, 8),
+        .header = test_header(9, 8),
         .prev_log_index = idx(4),
         .prev_log_term = term(2),
         .leader_commit = idx(4),
@@ -228,7 +228,7 @@ test "transport: two fixtures of one type stay independent behind their own poin
     var right: Recorder = .{};
     const transport_left = Transport.init(&left);
     const transport_right = Transport.init(&right);
-    const message = testVote(1, 2);
+    const message = test_vote(1, 2);
 
     transport_left.send(&message);
     transport_left.send(&message);
@@ -487,7 +487,7 @@ const StubStore = struct {
     syncs: u32 = 0,
     fault: Fault = .none,
 
-    fn writeFault(self: *const StubStore) WriteError!void {
+    fn write_fault(self: *const StubStore) WriteError!void {
         switch (self.fault) {
             .full => return error.StoreFull,
             .io => return error.StoreIoFailed,
@@ -495,11 +495,11 @@ const StubStore = struct {
         }
     }
 
-    fn updateFault(self: *const StubStore) UpdateError!void {
+    fn update_fault(self: *const StubStore) UpdateError!void {
         if (self.fault == .io) return error.StoreIoFailed;
     }
 
-    fn readFault(self: *const StubStore) ReadError!void {
+    fn read_fault(self: *const StubStore) ReadError!void {
         switch (self.fault) {
             .corrupt => return error.StoreCorrupt,
             .io => return error.StoreIoFailed,
@@ -508,7 +508,7 @@ const StubStore = struct {
     }
 
     pub fn append(self: *StubStore, entries: []const Entry) WriteError!void {
-        try self.writeFault();
+        try self.write_fault();
         if (self.last - self.base + entries.len > self.capacity) return error.StoreFull;
         assert(self.last + entries.len < slots_max);
         for (entries) |entry| self.entries[@intFromEnum(entry.index)] = entry;
@@ -516,12 +516,12 @@ const StubStore = struct {
     }
 
     pub fn truncate(self: *StubStore, from: Index) UpdateError!void {
-        try self.updateFault();
+        try self.update_fault();
         self.last = @intFromEnum(from) - 1;
     }
 
     pub fn get(self: *StubStore, index: Index) ReadError!Entry {
-        try self.readFault();
+        try self.read_fault();
         return self.entries[@intFromEnum(index)];
     }
 
@@ -530,12 +530,12 @@ const StubStore = struct {
     }
 
     pub fn save_hard_state(self: *StubStore, hard_state: *const HardState) UpdateError!void {
-        try self.updateFault();
+        try self.update_fault();
         self.hard_state = hard_state.*;
     }
 
     pub fn load_hard_state(self: *StubStore) ReadError!HardState {
-        try self.readFault();
+        try self.read_fault();
         return self.hard_state;
     }
 
@@ -544,7 +544,7 @@ const StubStore = struct {
         snapshot: *const Snapshot,
         configuration: *const Configuration,
     ) WriteError!void {
-        try self.writeFault();
+        try self.write_fault();
         const index = @intFromEnum(snapshot.index);
         const compaction = index <= self.last and self.entries[index].term == snapshot.term;
         if (!compaction) self.last = index;
@@ -553,12 +553,12 @@ const StubStore = struct {
     }
 
     pub fn load_snapshot(self: *StubStore) ReadError!?SnapshotRecord {
-        try self.readFault();
+        try self.read_fault();
         return self.record;
     }
 
     pub fn sync(self: *StubStore) UpdateError!void {
-        try self.updateFault();
+        try self.update_fault();
         self.syncs += 1;
     }
 };
@@ -570,8 +570,8 @@ const test_configuration: Configuration = .{
     .learners = &.{},
 };
 
-fn appendThree(store: LogStore) !void {
-    const batch = [_]Entry{ testEntry(1, 1), testEntry(2, 1), testEntry(3, 2) };
+fn append_three(store: LogStore) !void {
+    const batch = [_]Entry{ test_entry(1, 1), test_entry(2, 1), test_entry(3, 2) };
     try store.append(&batch);
 }
 
@@ -580,10 +580,10 @@ test "log_store: a fresh store is empty and appends advance last_index" {
     const store = LogStore.init(&stub);
     try testing.expectEqual(Index.zero, store.last_index());
 
-    try appendThree(store);
+    try append_three(store);
     try testing.expectEqual(idx(3), store.last_index());
 
-    const more = [_]Entry{testEntry(4, 2)};
+    const more = [_]Entry{test_entry(4, 2)};
     try store.append(&more);
     try testing.expectEqual(idx(4), store.last_index());
 }
@@ -594,7 +594,7 @@ test "log_store: get returns the entry at the index with its term and borrowed d
     const payload = try testing.allocator.dupe(u8, "set x 1");
     defer testing.allocator.free(payload);
     const batch = [_]Entry{
-        testEntry(1, 1),
+        test_entry(1, 1),
         .{ .index = idx(2), .term = term(4), .kind = .normal, .data = payload },
     };
     try store.append(&batch);
@@ -612,10 +612,10 @@ test "log_store: get returns the entry at the index with its term and borrowed d
 test "log_store: StoreFull passes through, leaves last_index unchanged, entries readable" {
     var stub: StubStore = .{ .capacity = 2 };
     const store = LogStore.init(&stub);
-    const fill = [_]Entry{ testEntry(1, 1), testEntry(2, 1) };
+    const fill = [_]Entry{ test_entry(1, 1), test_entry(2, 1) };
     try store.append(&fill);
 
-    const over = [_]Entry{testEntry(3, 1)};
+    const over = [_]Entry{test_entry(3, 1)};
     try testing.expectError(error.StoreFull, store.append(&over));
 
     try testing.expectEqual(idx(2), store.last_index());
@@ -625,14 +625,14 @@ test "log_store: StoreFull passes through, leaves last_index unchanged, entries 
 test "log_store: a batch that only partly fits is rejected whole (StoreFull boundary)" {
     var stub: StubStore = .{ .capacity = 2 };
     const store = LogStore.init(&stub);
-    const one = [_]Entry{testEntry(1, 1)};
+    const one = [_]Entry{test_entry(1, 1)};
     try store.append(&one);
 
-    const two = [_]Entry{ testEntry(2, 1), testEntry(3, 1) };
+    const two = [_]Entry{ test_entry(2, 1), test_entry(3, 1) };
     try testing.expectError(error.StoreFull, store.append(&two));
     try testing.expectEqual(idx(1), store.last_index());
 
-    const exact = [_]Entry{testEntry(2, 1)}; // Exactly the remaining capacity fits.
+    const exact = [_]Entry{test_entry(2, 1)}; // Exactly the remaining capacity fits.
     try store.append(&exact);
     try testing.expectEqual(idx(2), store.last_index());
 }
@@ -640,13 +640,13 @@ test "log_store: a batch that only partly fits is rejected whole (StoreFull boun
 test "log_store: freeing space after StoreFull lets the same append succeed" {
     var stub: StubStore = .{ .capacity = 2 };
     const store = LogStore.init(&stub);
-    const fill = [_]Entry{ testEntry(1, 1), testEntry(2, 1) };
+    const fill = [_]Entry{ test_entry(1, 1), test_entry(2, 1) };
     try store.append(&fill);
-    const next = [_]Entry{testEntry(3, 2)};
+    const next = [_]Entry{test_entry(3, 2)};
     try testing.expectError(error.StoreFull, store.append(&next));
 
     try store.truncate(idx(2));
-    const replacement = [_]Entry{testEntry(2, 2)};
+    const replacement = [_]Entry{test_entry(2, 2)};
     try store.append(&replacement);
 
     try testing.expectEqual(idx(2), store.last_index());
@@ -656,11 +656,11 @@ test "log_store: freeing space after StoreFull lets the same append succeed" {
 test "log_store: truncate drops the suffix and a conflicting entry can replace it" {
     var stub: StubStore = .{ .capacity = 8 };
     const store = LogStore.init(&stub);
-    try appendThree(store);
+    try append_three(store);
 
     try store.truncate(idx(3)); // Drops only index 3.
     try testing.expectEqual(idx(2), store.last_index());
-    const conflicting = [_]Entry{testEntry(3, 5)};
+    const conflicting = [_]Entry{test_entry(3, 5)};
     try store.append(&conflicting);
     try testing.expectEqual(term(5), (try store.get(idx(3))).term);
 
@@ -676,7 +676,7 @@ test "log_store: load_hard_state is empty until saved, then round-trips" {
     const initial = try store.load_hard_state();
     try testing.expect(initial.eql(&HardState.empty));
 
-    try appendThree(store); // commit_index <= last_index: append before save.
+    try append_three(store); // commit_index <= last_index: append before save.
     const saved: HardState = .{ .term = term(2), .vote = node(3), .commit_index = idx(2) };
     try store.save_hard_state(&saved);
 
@@ -696,7 +696,7 @@ test "log_store: load_snapshot is null on a fresh store" {
 test "log_store: compaction snapshot keeps the suffix and round-trips its record" {
     var stub: StubStore = .{ .capacity = 8 };
     const store = LogStore.init(&stub);
-    try appendThree(store);
+    try append_three(store);
     const snapshot: Snapshot = .{ .index = idx(2), .term = term(1), .data = "state@2" };
 
     try store.save_snapshot(&snapshot, &test_configuration);
@@ -713,7 +713,7 @@ test "log_store: compaction snapshot keeps the suffix and round-trips its record
 test "log_store: install snapshot with a different term drops all entries" {
     var stub: StubStore = .{ .capacity = 8 };
     const store = LogStore.init(&stub);
-    try appendThree(store);
+    try append_three(store);
     // Index 2 is held at term 1 locally; the snapshot says term 9: histories diverged.
     const diverged: Snapshot = .{ .index = idx(2), .term = term(9), .data = "" };
     try store.save_snapshot(&diverged, &test_configuration);
@@ -730,7 +730,7 @@ test "log_store: sync is the durability barrier and is called through the vtable
     var stub: StubStore = .{ .capacity = 8 };
     const store = LogStore.init(&stub);
     try store.sync();
-    try appendThree(store);
+    try append_three(store);
     try store.sync();
     try testing.expectEqual(@as(u32, 2), stub.syncs);
 }
@@ -738,10 +738,10 @@ test "log_store: sync is the durability barrier and is called through the vtable
 test "log_store: StoreIoFailed on append and save_snapshot leaves the store unchanged" {
     var stub: StubStore = .{ .capacity = 8 };
     const store = LogStore.init(&stub);
-    try appendThree(store);
+    try append_three(store);
 
     stub.fault = .io;
-    const next = [_]Entry{testEntry(4, 2)};
+    const next = [_]Entry{test_entry(4, 2)};
     try testing.expectError(error.StoreIoFailed, store.append(&next));
     const snapshot: Snapshot = .{ .index = idx(2), .term = term(1), .data = "" };
     const saved = store.save_snapshot(&snapshot, &test_configuration);
@@ -757,7 +757,7 @@ test "log_store: StoreIoFailed on append and save_snapshot leaves the store unch
 test "log_store: StoreFull on save_snapshot passes through and stores nothing" {
     var stub: StubStore = .{ .capacity = 8 };
     const store = LogStore.init(&stub);
-    try appendThree(store);
+    try append_three(store);
     stub.fault = .full;
     const snapshot: Snapshot = .{ .index = idx(2), .term = term(1), .data = "big" };
 
@@ -771,7 +771,7 @@ test "log_store: StoreFull on save_snapshot passes through and stores nothing" {
 test "log_store: StoreIoFailed on truncate, save_hard_state and sync passes through" {
     var stub: StubStore = .{ .capacity = 8 };
     const store = LogStore.init(&stub);
-    try appendThree(store);
+    try append_three(store);
     stub.fault = .io;
 
     try testing.expectError(error.StoreIoFailed, store.truncate(idx(2)));
@@ -788,7 +788,7 @@ test "log_store: StoreIoFailed on truncate, save_hard_state and sync passes thro
 test "log_store: StoreCorrupt and StoreIoFailed on every read path pass through" {
     var stub: StubStore = .{ .capacity = 8 };
     const store = LogStore.init(&stub);
-    try appendThree(store);
+    try append_three(store);
 
     stub.fault = .corrupt;
     try testing.expectError(error.StoreCorrupt, store.get(idx(1)));
@@ -849,7 +849,7 @@ const Machine = struct {
 };
 
 /// Snapshots `machine` through the vtable into a `gpa`-owned buffer of exactly the stream size.
-fn snapshotBytes(gpa: std.mem.Allocator, machine: StateMachine) ![]u8 {
+fn snapshot_bytes(gpa: std.mem.Allocator, machine: StateMachine) ![]u8 {
     const buffer = try gpa.alloc(u8, Machine.stream_len);
     errdefer gpa.free(buffer);
     var writer = std.Io.Writer.fixed(buffer);
@@ -859,7 +859,7 @@ fn snapshotBytes(gpa: std.mem.Allocator, machine: StateMachine) ![]u8 {
     return buffer;
 }
 
-fn machineWithState() Machine {
+fn machine_with_state() Machine {
     return .{ .sum = 195 + 1, .applied = 3 };
 }
 
@@ -891,7 +891,7 @@ test "state_machine: apply sees every entry kind in order, no-ops and conf_chang
 test "state_machine: StateMachineFailed passes through apply, snapshot and restore" {
     var machine: Machine = .{ .fault = true };
     const sm = StateMachine.init(&machine);
-    const entry = testEntry(1, 1);
+    const entry = test_entry(1, 1);
     try testing.expectError(error.StateMachineFailed, sm.apply(&entry));
 
     var storage: [Machine.stream_len]u8 = undefined;
@@ -905,8 +905,8 @@ test "state_machine: StateMachineFailed passes through apply, snapshot and resto
 }
 
 test "state_machine: snapshot then restore into a fresh machine reproduces the state" {
-    var source = machineWithState();
-    const bytes = try snapshotBytes(testing.allocator, StateMachine.init(&source));
+    var source = machine_with_state();
+    const bytes = try snapshot_bytes(testing.allocator, StateMachine.init(&source));
     defer testing.allocator.free(bytes);
 
     var target: Machine = .{ .sum = 999, .applied = 9 }; // Prior state must be replaced.
@@ -919,7 +919,7 @@ test "state_machine: snapshot then restore into a fresh machine reproduces the s
 }
 
 test "state_machine: a writer one byte too small fails with WriteFailed, exact size fits" {
-    var source = machineWithState();
+    var source = machine_with_state();
     const sm = StateMachine.init(&source);
     var small: [Machine.stream_len - 1]u8 = undefined;
     var short_writer = std.Io.Writer.fixed(&small);
@@ -929,31 +929,31 @@ test "state_machine: a writer one byte too small fails with WriteFailed, exact s
     var zero_writer = std.Io.Writer.fixed(&empty);
     try testing.expectError(error.WriteFailed, sm.snapshot(&zero_writer));
 
-    const bytes = try snapshotBytes(testing.allocator, sm); // Exact size succeeds.
+    const bytes = try snapshot_bytes(testing.allocator, sm); // Exact size succeeds.
     testing.allocator.free(bytes);
 }
 
 test "state_machine: every truncated prefix of a snapshot fails with EndOfStream" {
-    var source = machineWithState();
-    const bytes = try snapshotBytes(testing.allocator, StateMachine.init(&source));
+    var source = machine_with_state();
+    const bytes = try snapshot_bytes(testing.allocator, StateMachine.init(&source));
     defer testing.allocator.free(bytes);
 
     for (0..bytes.len) |length| {
-        var target = machineWithState();
+        var target = machine_with_state();
         var reader = std.Io.Reader.fixed(bytes[0..length]);
         try testing.expectError(error.EndOfStream, StateMachine.init(&target).restore(&reader));
     }
 }
 
 test "state_machine: a failing reader surfaces ReadFailed" {
-    var target = machineWithState();
+    var target = machine_with_state();
     var reader = std.Io.Reader.failing;
     try testing.expectError(error.ReadFailed, StateMachine.init(&target).restore(&reader));
 }
 
 test "state_machine: bad magic and a corrupted body are StateMachineSnapshotInvalid" {
-    var source = machineWithState();
-    const bytes = try snapshotBytes(testing.allocator, StateMachine.init(&source));
+    var source = machine_with_state();
+    const bytes = try snapshot_bytes(testing.allocator, StateMachine.init(&source));
     defer testing.allocator.free(bytes);
     var target: Machine = .{};
     const sm = StateMachine.init(&target);
@@ -974,8 +974,8 @@ test "state_machine: bad magic and a corrupted body are StateMachineSnapshotInva
 }
 
 test "state_machine: a failed restore leaves reset state and a retry with a fresh reader works" {
-    var source = machineWithState();
-    const bytes = try snapshotBytes(testing.allocator, StateMachine.init(&source));
+    var source = machine_with_state();
+    const bytes = try snapshot_bytes(testing.allocator, StateMachine.init(&source));
     defer testing.allocator.free(bytes);
     var target: Machine = .{ .sum = 999, .applied = 9 };
     const sm = StateMachine.init(&target);

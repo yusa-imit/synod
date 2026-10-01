@@ -42,7 +42,7 @@ pub const SnapshotRecord = struct {
 
 /// The implementation struct behind `impl`, which must be `*T` with `T` a non-zero-sized
 /// struct (a zero-sized one has no distinct address to erase).
-fn implType(comptime P: type) type {
+fn impl_type(comptime P: type) type {
     const info = @typeInfo(P);
     if (info != .pointer or info.pointer.size != .one or info.pointer.is_const) {
         @compileError("interface init expects a mutable single-item pointer *T, found " ++
@@ -61,7 +61,7 @@ fn implType(comptime P: type) type {
 /// True when a method returning `Actual` can stand in for one declared to return `Expected`:
 /// identical, or an error union with the same payload whose error set is a subset (it then
 /// coerces in the generated thunk).
-fn returnCompatible(comptime Actual: type, comptime Expected: type) bool {
+fn return_compatible(comptime Actual: type, comptime Expected: type) bool {
     if (Actual == Expected) return true;
     const actual = @typeInfo(Actual);
     const expected = @typeInfo(Expected);
@@ -80,7 +80,7 @@ fn returnCompatible(comptime Actual: type, comptime Expected: type) bool {
 }
 
 /// Compile error unless `T` declares method `name` as `fn (*T, params...) Return`.
-fn requireMethod(
+fn require_method(
     comptime T: type,
     comptime name: []const u8,
     comptime params: []const type,
@@ -101,7 +101,7 @@ fn requireMethod(
             @compileError(where ++ " parameter type mismatch, expected " ++ @typeName(Param));
         }
     }
-    if (!returnCompatible(function.return_type.?, Return)) {
+    if (!return_compatible(function.return_type.?, Return)) {
         @compileError(where ++ " must return " ++ @typeName(Return));
     }
 }
@@ -128,8 +128,8 @@ pub const Transport = struct {
     /// Builds a `Transport` over `impl` (`*T`, `T` a non-zero-sized struct with
     /// `pub fn send(self: *T, message: *const Message) void`). `impl` must outlive the result.
     pub fn init(impl: anytype) Transport {
-        const T = comptime implType(@TypeOf(impl));
-        comptime requireMethod(T, "send", &.{*const Message}, void);
+        const T = comptime impl_type(@TypeOf(impl));
+        comptime require_method(T, "send", &.{*const Message}, void);
         return .{ .ptr = impl, .vtable = &Static(T).vtable };
     }
 
@@ -173,8 +173,8 @@ pub const Clock = struct {
     /// Builds a `Clock` over `impl` (`*T`, `T` a non-zero-sized struct with
     /// `pub fn now_ms(self: *T) u64`). `impl` must outlive the result.
     pub fn init(impl: anytype) Clock {
-        const T = comptime implType(@TypeOf(impl));
-        comptime requireMethod(T, "now_ms", &.{}, u64);
+        const T = comptime impl_type(@TypeOf(impl));
+        comptime require_method(T, "now_ms", &.{}, u64);
         return .{ .ptr = impl, .vtable = &Static(T).vtable };
     }
 
@@ -213,8 +213,8 @@ pub const Rng = struct {
     /// Builds an `Rng` over `impl` (`*T`, `T` a non-zero-sized struct with
     /// `pub fn next_u64(self: *T) u64`). `impl` must outlive the result.
     pub fn init(impl: anytype) Rng {
-        const T = comptime implType(@TypeOf(impl));
-        comptime requireMethod(T, "next_u64", &.{}, u64);
+        const T = comptime impl_type(@TypeOf(impl));
+        comptime require_method(T, "next_u64", &.{}, u64);
         return .{ .ptr = impl, .vtable = &Static(T).vtable };
     }
 
@@ -270,10 +270,10 @@ pub const StateMachine = struct {
     /// Builds a `StateMachine` over `impl` (`*T`, `T` a non-zero-sized struct with `apply`,
     /// `snapshot`, `restore` of the `VTable` signatures). `impl` must outlive the result.
     pub fn init(impl: anytype) StateMachine {
-        const T = comptime implType(@TypeOf(impl));
-        comptime requireMethod(T, "apply", &.{*const Entry}, ApplyError!void);
-        comptime requireMethod(T, "snapshot", &.{*std.Io.Writer}, SnapshotError!void);
-        comptime requireMethod(T, "restore", &.{*std.Io.Reader}, RestoreError!void);
+        const T = comptime impl_type(@TypeOf(impl));
+        comptime require_method(T, "apply", &.{*const Entry}, ApplyError!void);
+        comptime require_method(T, "snapshot", &.{*std.Io.Writer}, SnapshotError!void);
+        comptime require_method(T, "restore", &.{*std.Io.Reader}, RestoreError!void);
         return .{ .ptr = impl, .vtable = &Static(T).vtable };
     }
 
@@ -365,22 +365,22 @@ pub const LogStore = struct {
     /// `VTable` field, error sets equal to or narrower than the named ones). `impl` must
     /// outlive the result.
     pub fn init(impl: anytype) LogStore {
-        const T = comptime implType(@TypeOf(impl));
-        comptime requireMethods(T);
+        const T = comptime impl_type(@TypeOf(impl));
+        comptime require_methods(T);
         return .{ .ptr = impl, .vtable = &Static(T).vtable };
     }
 
-    fn requireMethods(comptime T: type) void {
-        requireMethod(T, "append", &.{[]const Entry}, WriteError!void);
-        requireMethod(T, "truncate", &.{Index}, UpdateError!void);
-        requireMethod(T, "get", &.{Index}, ReadError!Entry);
-        requireMethod(T, "last_index", &.{}, Index);
-        requireMethod(T, "save_hard_state", &.{*const HardState}, UpdateError!void);
-        requireMethod(T, "load_hard_state", &.{}, ReadError!HardState);
+    fn require_methods(comptime T: type) void {
+        require_method(T, "append", &.{[]const Entry}, WriteError!void);
+        require_method(T, "truncate", &.{Index}, UpdateError!void);
+        require_method(T, "get", &.{Index}, ReadError!Entry);
+        require_method(T, "last_index", &.{}, Index);
+        require_method(T, "save_hard_state", &.{*const HardState}, UpdateError!void);
+        require_method(T, "load_hard_state", &.{}, ReadError!HardState);
         const snapshot_params = &.{ *const Snapshot, *const Configuration };
-        requireMethod(T, "save_snapshot", snapshot_params, WriteError!void);
-        requireMethod(T, "load_snapshot", &.{}, ReadError!?SnapshotRecord);
-        requireMethod(T, "sync", &.{}, UpdateError!void);
+        require_method(T, "save_snapshot", snapshot_params, WriteError!void);
+        require_method(T, "load_snapshot", &.{}, ReadError!?SnapshotRecord);
+        require_method(T, "sync", &.{}, UpdateError!void);
     }
 
     fn Static(comptime T: type) type {
@@ -527,7 +527,7 @@ pub const LogStore = struct {
     ) WriteError!void {
         assert(snapshot.index != Index.zero);
         assert(snapshot.term != Term.zero);
-        assert(configurationValid(configuration));
+        assert(configuration_valid(configuration));
         const last_before = self.last_index();
         self.vtable.save_snapshot(self.ptr, snapshot, configuration) catch |err| {
             switch (err) {
@@ -565,7 +565,7 @@ fn hard_state_coherent(hard_state: *const HardState) bool {
     return hard_state.term != Term.zero;
 }
 
-fn configurationValid(configuration: *const Configuration) bool {
+fn configuration_valid(configuration: *const Configuration) bool {
     configuration.validate() catch return false;
     return true;
 }
