@@ -11,6 +11,8 @@ All notable changes to this project are documented in this file. Format follows
   helpers) renamed to snake_case per Tiger Style §3.6. No public API change.
 - `build.zig`, `tools/tidy.zig`, `tools/tidy_test.zig`, `bench/main.zig`: camelCase functions
   renamed to snake_case per Tiger Style §3.6. No library API change.
+- `src/store_test.zig`: tests now provoke all eight `MemoryStore.check_invariants` error variants
+  (`CountOverCapacity` through `SnapshotMisplaced`), each with a valid-state control. Test-only.
 
 ## [0.3.0] - 2026-10-01
 
