@@ -7,6 +7,8 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Changed
 
+- `src/interfaces.zig`, `src/interfaces_test.zig`: the 15 remaining camelCase functions (private
+  helpers) renamed to snake_case per Tiger Style §3.6. No public API change.
 - `build.zig`, `tools/tidy.zig`, `tools/tidy_test.zig`, `bench/main.zig`: camelCase functions
   renamed to snake_case per Tiger Style §3.6. No library API change.
 
