@@ -378,3 +378,127 @@ fn model_run(seed: u64, steps: u32) !void {
 test "store: memory store matches the reference model over seeded operation streams" {
     for (0..24) |seed| try model_run(seed, 400);
 }
+
+/// A store holding entries 1..2 (terms 1, 2; data "ab", "c") and no snapshot.
+fn make_with_entries(target: *MemoryStore) !void {
+    try make(target, .{ .entries_max = 4, .data_bytes_max = 8, .snapshot_bytes_max = 4 });
+    errdefer target.deinit(testing.allocator);
+    try LogStore.init(target).append(&.{ entry(1, 1, "ab"), entry(2, 2, "c") });
+    try target.check_invariants();
+}
+
+/// A store with one saved snapshot at index 3, term 2, with a one-voter configuration.
+fn make_with_snapshot(target: *MemoryStore) !void {
+    try make(target, .{ .entries_max = 4, .data_bytes_max = 4, .snapshot_bytes_max = 4 });
+    errdefer target.deinit(testing.allocator);
+    const snapshot: Snapshot = .{ .index = idx(3), .term = term(2), .data = "xy" };
+    try LogStore.init(target).save_snapshot(&snapshot, &one_voter);
+    try target.check_invariants();
+}
+
+test "store: check_invariants names CountOverCapacity and DataOverCapacity" {
+    var memory: MemoryStore = undefined;
+    try make_with_entries(&memory);
+    defer memory.deinit(testing.allocator);
+
+    memory.count = 5; // entries_max is 4.
+    try testing.expectError(error.CountOverCapacity, memory.check_invariants());
+    memory.count = 2;
+    memory.data_used = 9; // data_bytes_max is 8.
+    try testing.expectError(error.DataOverCapacity, memory.check_invariants());
+    memory.data_used = 3;
+    try memory.check_invariants(); // Restored state is valid again.
+}
+
+test "store: check_invariants names EntryIndexGap and EntryTermInvalid" {
+    var memory: MemoryStore = undefined;
+    try make_with_entries(&memory);
+    defer memory.deinit(testing.allocator);
+
+    memory.entries[1].index = idx(3); // Window must continue at base_index + 1 + position.
+    try testing.expectError(error.EntryIndexGap, memory.check_invariants());
+    memory.entries[1].index = idx(2);
+
+    memory.entries[0].term = Term.zero; // Term zero is never a stored term.
+    try testing.expectError(error.EntryTermInvalid, memory.check_invariants());
+    memory.entries[0].term = term(3); // Terms must not regress: 3 then 2.
+    try testing.expectError(error.EntryTermInvalid, memory.check_invariants());
+    memory.entries[0].term = term(1);
+    try memory.check_invariants();
+}
+
+test "store: check_invariants names EntryDataMisplaced for a moved slice and a stray byte" {
+    var memory: MemoryStore = undefined;
+    try make_with_entries(&memory);
+    defer memory.deinit(testing.allocator);
+
+    const original = memory.entries[1].data;
+    memory.entries[1].data = memory.data[3..4]; // Not packed right after entry 1's bytes.
+    try testing.expectError(error.EntryDataMisplaced, memory.check_invariants());
+    memory.entries[1].data = original;
+
+    memory.data_used = 4; // Packed bytes sum to 3, so one byte is unaccounted for.
+    try testing.expectError(error.EntryDataMisplaced, memory.check_invariants());
+    memory.data_used = 3;
+    try memory.check_invariants();
+}
+
+test "store: check_invariants names SnapshotMissing and SnapshotUnexpected" {
+    var memory: MemoryStore = undefined;
+    try make_with_snapshot(&memory);
+    defer memory.deinit(testing.allocator);
+
+    const record = memory.snapshot;
+    memory.snapshot = null; // A compaction offset with nothing to restore from.
+    try testing.expectError(error.SnapshotMissing, memory.check_invariants());
+    memory.snapshot = record;
+
+    const base = memory.base_index;
+    memory.base_index = Index.zero; // A snapshot while the log claims to start at the beginning.
+    try testing.expectError(error.SnapshotUnexpected, memory.check_invariants());
+    memory.base_index = base;
+    try memory.check_invariants();
+}
+
+test "store: check_invariants names SnapshotMisplaced for each way the record drifts" {
+    var memory: MemoryStore = undefined;
+    try make_with_snapshot(&memory);
+    defer memory.deinit(testing.allocator);
+    const saved = memory.snapshot.?;
+
+    var drifted = saved;
+    drifted.snapshot.index = idx(4);
+    memory.snapshot = drifted;
+    try testing.expectError(error.SnapshotMisplaced, memory.check_invariants());
+
+    drifted = saved;
+    drifted.snapshot.term = term(9);
+    memory.snapshot = drifted;
+    try testing.expectError(error.SnapshotMisplaced, memory.check_invariants());
+
+    drifted = saved;
+    drifted.snapshot.data = memory.snapshot_data[0..4]; // Fits the buffer exactly: still valid.
+    memory.snapshot = drifted;
+    try memory.check_invariants();
+    drifted.snapshot.data = memory.snapshot_data.ptr[0 .. memory.snapshot_data.len + 1];
+    memory.snapshot = drifted; // One byte past the buffer.
+    try testing.expectError(error.SnapshotMisplaced, memory.check_invariants());
+
+    drifted = saved;
+    drifted.snapshot.data = memory.data[0..2]; // Payload outside `snapshot_data`.
+    memory.snapshot = drifted;
+    try testing.expectError(error.SnapshotMisplaced, memory.check_invariants());
+
+    drifted = saved;
+    drifted.configuration.voters = single_voter[0..]; // Node list outside `node_ids`.
+    memory.snapshot = drifted;
+    try testing.expectError(error.SnapshotMisplaced, memory.check_invariants());
+
+    drifted = saved;
+    drifted.configuration.learners = memory.node_ids; // More nodes than `node_ids` holds.
+    memory.snapshot = drifted;
+    try testing.expectError(error.SnapshotMisplaced, memory.check_invariants());
+
+    memory.snapshot = saved;
+    try memory.check_invariants();
+}
