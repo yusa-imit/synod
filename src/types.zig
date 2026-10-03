@@ -971,6 +971,57 @@ test "types: Message.validate rejects an inconsistent log position on request_vo
     );
 }
 
+test "types: Message.validate rejects a nonzero log index with a zero term on request_vote" {
+    const message: Message = .{ .request_vote = .{
+        .header = test_header(5, 1, 2),
+        .last_log_index = @enumFromInt(1),
+        .last_log_term = .zero,
+    } };
+    try std.testing.expectError(error.MessageLogPositionInvalid, message.validate(test_limits));
+    const empty_log: Message = .{ .request_vote = .{
+        .header = test_header(5, 1, 2),
+        .last_log_index = .zero,
+        .last_log_term = .zero,
+    } };
+    try empty_log.validate(test_limits); // Both zero is the one valid "no entry" position.
+}
+
+test "types: Message.validate rejects an inconsistent prev log position on append_entries" {
+    const zero_index_nonzero_term: Message = .{ .append_entries = .{
+        .header = test_header(5, 1, 2),
+        .prev_log_index = .zero,
+        .prev_log_term = @enumFromInt(1),
+        .leader_commit = .zero,
+        .round = 1,
+        .entries = &.{},
+    } };
+    try std.testing.expectError(
+        error.MessageLogPositionInvalid,
+        zero_index_nonzero_term.validate(test_limits),
+    );
+    const term_above_header: Message = .{ .append_entries = .{
+        .header = test_header(5, 1, 2),
+        .prev_log_index = @enumFromInt(10),
+        .prev_log_term = @enumFromInt(6),
+        .leader_commit = .zero,
+        .round = 1,
+        .entries = &.{},
+    } };
+    try std.testing.expectError(
+        error.MessageLogPositionInvalid,
+        term_above_header.validate(test_limits),
+    );
+    const term_at_header: Message = .{ .append_entries = .{
+        .header = test_header(5, 1, 2),
+        .prev_log_index = @enumFromInt(10),
+        .prev_log_term = @enumFromInt(5),
+        .leader_commit = .zero,
+        .round = 1,
+        .entries = &.{},
+    } };
+    try term_at_header.validate(test_limits); // Boundary: prev term == header term is valid.
+}
+
 test "types: Message.validate rejects non-contiguous append_entries" {
     const entries = [_]Entry{test_entry(12, 5, .normal, "a")}; // Skips index 11.
     const message: Message = .{ .append_entries = .{
