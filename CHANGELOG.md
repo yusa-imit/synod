@@ -13,6 +13,9 @@ All notable changes to this project are documented in this file. Format follows
   renamed to snake_case per Tiger Style §3.6. No library API change.
 - `src/store_test.zig`: tests now provoke all eight `MemoryStore.check_invariants` error variants
   (`CountOverCapacity` through `SnapshotMisplaced`), each with a valid-state control. Test-only.
+- `src/types.zig`: tests now provoke every `MessageLogPositionInvalid` branch of
+  `Message.validate` (nonzero index with zero term on votes; zero index with nonzero term and
+  `prev_log_term` above the header term on `append_entries`). Test-only.
 
 ## [0.3.0] - 2026-10-01
 
