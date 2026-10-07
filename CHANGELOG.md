@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- `docs/adr/0007-raft-node-contract.md`: ADR-007 fixes the `raft.Node`, `Input`, `Effect`,
+  `Config`, and `Driver` contract (plan 003 item 1). Docs only.
+
 ### Changed
 
 - `src/interfaces.zig`, `src/interfaces_test.zig`: the 15 remaining camelCase functions (private
