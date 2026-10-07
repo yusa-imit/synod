@@ -16,7 +16,7 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
 
 ## Scope
 
-- [ ] **ADR-007 — `Node`, `Input`, `Effect`, `Config`, driver contract.** `architect` (opus),
+- [x] **ADR-007 — `Node`, `Input`, `Effect`, `Config`, driver contract.** `architect` (opus),
       docs-only PR. PRD §4.2's `![]Effect` leaves ownership open and `tick(now_ms)` conflicts
       with the injected `Clock`; decide: the bounded Effects container returned by value (sized
       at `init` from `voters_max + learners_max` and `Message.Limits`, no growth); `tick` input;
