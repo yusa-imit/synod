@@ -274,14 +274,21 @@ pub const wire_struct_names = [_][]const u8{ "Message", "Entry", "HardState", "S
 /// — they take the injected `Clock`/`Rng` vtables from `src/interfaces.zig` instead, so
 /// `src/sim.zig` can drive them deterministically. `src/main.zig`, `bench/main.zig`,
 /// `src/driver.zig`, and `src/adapters.zig` are the `std.Io` boundary and are deliberately
-/// excluded.
+/// excluded. Every `.zig` file under `core_purity_dir` (`src/raft/`, plan 003 item 2A-i) is
+/// core-purity too, by prefix rather than by list entry, so a new file there is covered
+/// without editing this list.
 pub const core_purity_files = [_][]const u8{
     "src/raft.zig",  "src/membership.zig", "src/detector.zig",
     "src/clock.zig", "src/log.zig",
 };
 
+/// Directory prefix whose `.zig` files are all core-purity (anchored at the start of `path`).
+pub const core_purity_dir = "src/raft/";
+
 /// True if `path` is one of the exact `core_purity_files` paths (a whole-path match, not a
-/// suffix or substring match — `src/sub/raft.zig` and `raft.zig` are both `false`).
+/// suffix or substring match — `src/sub/raft.zig` and `raft.zig` are both `false`), or a
+/// `.zig` file under the anchored `core_purity_dir` prefix (`src/raft/node.zig` is `true`;
+/// `src/raftx/a.zig`, `other/src/raft/a.zig` and `src/raft/notes.txt` are `false`).
 pub fn is_core_purity_file(path: []const u8) bool {
     assert(path.len > 0);
     comptime assert(core_purity_files.len == 5);
@@ -289,7 +296,8 @@ pub fn is_core_purity_file(path: []const u8) bool {
     for (core_purity_files) |core_path| {
         if (std.mem.eql(u8, path, core_path)) return true;
     }
-    return false;
+    if (!std.mem.startsWith(u8, path, core_purity_dir)) return false;
+    return std.mem.endsWith(u8, path, ".zig");
 }
 
 /// Precondition: `path` and `source` outlive the returned slice.

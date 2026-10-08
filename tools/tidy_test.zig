@@ -474,6 +474,55 @@ test "tidy: is_core_purity_file rejects a path that merely ends with a core-puri
     try testing.expect(!tidy.is_core_purity_file("raft.zig"));
 }
 
+test "tidy: is_core_purity_file covers every .zig file under the src/raft/ directory" {
+    // Plan 003 item 2A-i: `src/raft/node.zig` must not escape the ADR-002 `std.Io` ban.
+    const raft_files = [_][]const u8{
+        "src/raft/node.zig",
+        "src/raft/node_test.zig",
+        "src/raft/progress.zig",
+        "src/raft/fixtures.zig",
+        "src/raft/x.zig",
+    };
+    for (raft_files) |path| {
+        try testing.expect(tidy.is_core_purity_file(path));
+    }
+}
+
+test "tidy: is_core_purity_file src/raft/ prefix is anchored and directory-exact" {
+    // Sibling directory with a shared name prefix, and a differently-rooted copy.
+    try testing.expect(!tidy.is_core_purity_file("src/raftx/a.zig"));
+    try testing.expect(!tidy.is_core_purity_file("src/raft_extra/a.zig"));
+    try testing.expect(!tidy.is_core_purity_file("other/src/raft/a.zig"));
+    try testing.expect(!tidy.is_core_purity_file("raft/a.zig"));
+    try testing.expect(!tidy.is_core_purity_file("tools/src/raft/a.zig"));
+}
+
+test "tidy: is_core_purity_file src/raft/ prefix matches only .zig files" {
+    try testing.expect(!tidy.is_core_purity_file("src/raft/notes.txt"));
+    try testing.expect(!tidy.is_core_purity_file("src/raft/node.zig.orig"));
+    try testing.expect(!tidy.is_core_purity_file("src/raft/"));
+    try testing.expect(!tidy.is_core_purity_file("src/raft"));
+}
+
+test "tidy: the whole-path core-purity list is unchanged by the src/raft/ prefix rule" {
+    // The prefix is a second rule, not a sixth list entry: the exact list stays five long and
+    // the near-miss `src/sub/raft.zig` stays outside both rules.
+    try testing.expectEqual(@as(usize, 5), tidy.core_purity_files.len);
+    try testing.expect(tidy.is_core_purity_file("src/raft.zig"));
+    try testing.expect(!tidy.is_core_purity_file("src/sub/raft.zig"));
+}
+
+test "tidy: std.Io in a src/raft/x.zig fixture is flagged as a core-purity violation" {
+    const path = "src/raft/x.zig";
+    const source = "pub fn step(io: std.Io) void {\n    _ = io;\n}\n";
+    try testing.expect(tidy.is_core_purity_file(path));
+    const violations = try tidy.check_banned_pattern(testing.allocator, path, source, "std.Io");
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 1), violations.len);
+    try testing.expectEqual(@as(u32, 1), violations[0].line);
+    try testing.expectEqualStrings(path, violations[0].path);
+}
+
 test "tidy: check_banned_pattern flags std.Io in a src/raft.zig-shaped fixture" {
     const source =
         \\const std = @import("std");

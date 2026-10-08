@@ -9,9 +9,24 @@ All notable changes to this project are documented in this file. Format follows
 
 - `docs/adr/0007-raft-node-contract.md`: ADR-007 fixes the `raft.Node`, `Input`, `Effect`,
   `Config`, and `Driver` contract (plan 003 item 1). Docs only.
+- `src/raft/node.zig` (plan 003 item 2A-i): the `raft.Node` skeleton of ADR-007. `Config`,
+  `Restore`, `Input`, `Effect` (with `phase()`), `Effects`, `Role`, `Status`, the `InitError`,
+  `ReceiveError`, `ProposeError`, `StepError` and `InvariantError` sets, and `Node` with `init`
+  (copies `Restore` into node-owned storage allocated once), `deinit`, `step`, `status`,
+  `entries` and `check_invariants`. A higher term from a known member makes a follower and
+  emits one `save_hard_state`; a stale term is dropped; a `StepError` mutates nothing; ticks
+  only count. Elections, replication and apply land in later items. `src/raft.zig` re-exports
+  the public surface.
+- `src/raft/fixtures.zig`, `src/raft/node_test.zig`, `src/raft/node_step_test.zig`,
+  `src/raft/node_invariants_test.zig`: construction, term-rule, rejection, seeded-stream, fuzz
+  and invariant tests for `Node`.
+- `docs/PRD.md` §4.2 points at ADR-007 as the authoritative `Node`/`Effect` contract.
 
 ### Changed
 
+- `tools/tidy.zig`: `is_core_purity_file` also covers every `.zig` file under `src/raft/` (an
+  anchored prefix rule beside the five whole-path files), so `std.Io` is banned there too.
+- `src/raft.zig`: drops the unused `Error{NotImplemented}` stub set (ADR-007).
 - `src/interfaces.zig`, `src/interfaces_test.zig`: the 15 remaining camelCase functions (private
   helpers) renamed to snake_case per Tiger Style §3.6. No public API change.
 - `build.zig`, `tools/tidy.zig`, `tools/tidy_test.zig`, `bench/main.zig`: camelCase functions
