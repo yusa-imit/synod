@@ -144,6 +144,8 @@ test "node: restore entry term may equal hard_state.term but never exceed it" {
     try testing.expectError(error.RestoreInconsistent, init_result(config, &above));
     const from_zero = restore_of(.empty, &.{entry(1, 1, "")});
     try testing.expectError(error.RestoreInconsistent, init_result(config, &from_zero));
+    const zero_term = restore_of(hard_state_of(1, 0, 0), &.{entry(1, 0, "")});
+    try testing.expectError(error.RestoreInconsistent, init_result(config, &zero_term));
 }
 
 test "node: restore commit_index may reach the last index but never pass it" {
