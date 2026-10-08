@@ -105,6 +105,10 @@ pub const Effect = union(enum) {
 };
 ```
 
+> 위 스케치는 방향을 보여 줄 뿐이다. `Node`/`Effect`의 권위 있는 계약(`step(input)` 단일 진입점,
+> 소유권, 효과 순서, `Config`/`Restore`/`Driver`)은 ADR-007
+> ([`docs/adr/0007-raft-node-contract.md`](adr/0007-raft-node-contract.md))이다.
+
 `Driver`가 `Effect`를 Transport/LogStore/StateMachine에 실행한다. 이 분리 덕분에 코어는 시뮬레이터 안에서 그대로 돌아간다.
 
 ### 4.3 `membership` — SWIM

@@ -26,7 +26,7 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       `error.Invariant*` set; file layout `src/raft/{node,progress}.zig`. *Verify:*
       `docs/adr/0007-*.md` merged; every new `pub` symbol in items 2–10 is named in it.
       `blocked_by: none`
-- [ ] **2A-i `raft/node.zig` skeleton — roles, term rules, invariants.** First, widen tidy's
+- [x] **2A-i `raft/node.zig` skeleton — roles, term rules, invariants.** First, widen tidy's
       `core_purity_files` from whole-path matches to also cover `src/raft/` (today
       `src/raft/node.zig` would escape the `std.Io` ban; the gate must exist before the file).
       Then `init`, roles (follower, pre_candidate, candidate, leader), "higher term: step down

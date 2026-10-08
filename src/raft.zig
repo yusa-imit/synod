@@ -1,22 +1,33 @@
 //! synod.raft — Pure state machine: election (PreVote), replication, progress tracking,
 //! snapshot, joint-consensus membership, ReadIndex and lease reads.
 //!
-//! Planned files (see docs/PRD.md):
-//!   - `raft/node.zig`
-//!   - `raft/progress.zig`
-//!   - `raft/snapshot.zig`
-//!   - `raft/membership.zig`
-//!   - `raft/read.zig`
+//! Files (see docs/PRD.md and docs/adr/0007-raft-node-contract.md):
+//!   - `raft/node.zig`: implemented (plan 003 item 2A-i): `Node`, `Config`, `Restore`, `Input`,
+//!     `Effect`, `Effects`, and the error sets, re-exported below.
+//!   - `raft/progress.zig`: planned, internal (not re-exported)
+//!   - `raft/snapshot.zig`: planned
+//!   - `raft/membership.zig`: planned
+//!   - `raft/read.zig`: planned
 //!
-//! Status: stub. Public declarations are added as PRD phases land.
+//! Status: skeleton. `Node` restores, validates and routes messages, applies the term rules and
+//! counts ticks; elections, replication and apply land with the later items of plan 003.
 
 const std = @import("std");
 
-/// Module-level error set. Extend as functionality lands; keep names descriptive
-/// (`error.ChecksumMismatch`, not `error.Invalid`).
-pub const Error = error{
-    NotImplemented,
-};
+pub const node = @import("raft/node.zig");
+pub const Config = node.Config;
+pub const Restore = node.Restore;
+pub const Input = node.Input;
+pub const Effect = node.Effect;
+pub const Effects = node.Effects;
+pub const Role = node.Role;
+pub const Status = node.Status;
+pub const Node = node.Node;
+pub const InitError = node.InitError;
+pub const ReceiveError = node.ReceiveError;
+pub const ProposeError = node.ProposeError;
+pub const StepError = node.StepError;
+pub const InvariantError = node.InvariantError;
 
 test "raft: module compiles" {
     std.testing.refAllDecls(@This());
