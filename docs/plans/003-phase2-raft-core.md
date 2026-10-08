@@ -33,7 +33,7 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       and emit persist", stale-term drop, `check_invariants()`. *Verify:* tidy fixture with
       `std.Io` in `src/raft/x.zig` is flagged; term-rule tests call `check_invariants()` after
       every `step`. `blocked_by: none`
-- [ ] **2A-ii Election — randomized timeout, RequestVote, vote granting.** Timeout drawn from
+- [x] **2A-ii Election — randomized timeout, RequestVote, vote granting.** Timeout drawn from
       `Rng` in `[t, 2t)`; one vote per term, persisted before the response (Effect order);
       §5.4.1 up-to-date check via `log.last_index`/`term_at`; quorum over `Configuration`
       computed joint-shaped from day one (ADR-005) though Phase 2 never enters joint. *Verify:*

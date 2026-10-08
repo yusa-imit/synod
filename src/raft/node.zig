@@ -2,11 +2,15 @@
 //! `Effects`, `Role`, `Status`, the error sets, and `Node` (`init`, `deinit`, `step`, `status`,
 //! `entries`, `check_invariants`).
 //!
-//! Scope (plan 003 item 2A-i): the skeleton. A node restores from `Restore`, validates and
-//! routes every received message, applies the term rules (a higher term from a known member
-//! makes a follower and persists once; a stale term is dropped), counts ticks, and rejects
-//! proposals unless it leads. Elections (2A-ii), replication (2B) and apply (2C) land later and
-//! extend `step_message`, `step_tick` and `step_propose` without changing a signature.
+//! Scope (plan 003 items 2A-i and 2A-ii): the skeleton and the election. A node restores from
+//! `Restore`, validates and routes every received message, applies the term rules (a higher
+//! term from a known member makes a follower and persists once; a stale term is dropped),
+//! counts ticks, and rejects proposals unless it leads. A tick past the election timeout starts
+//! a campaign; `request_vote` is granted once per term to an up-to-date candidate; granted
+//! `request_vote_response`s are counted against a joint-shaped quorum, and a winner appends the
+//! empty entry of its term (§5.4.2). PreVote, replication (2B) and apply (2C) land later and
+//! extend `step_message`, `step_tick` and `step_propose` without changing a signature. The pure
+//! decisions (up-to-date, quorum) live in `election.zig`.
 //!
 //! Invariants: `check_invariants` states them: commit within the log, applied within commit,
 //! the term at least the last entry's term, no vote in term zero, `role == .leader` exactly
@@ -14,7 +18,8 @@
 //! order. A `StepError` returns before any mutation and with no `Effects`.
 //!
 //! Allocation: `init` allocates everything the node will ever use from `gpa` (log slots, the
-//! `log_bytes_max` entry-byte arena, the member list, and `peers_max + 5` effect slots). `step`
+//! `log_bytes_max` entry-byte arena, the member list, the `2 * voters_max` vote tally, and
+//! `peers_max + 5` effect slots). `step`
 //! and every other method take no allocator and never allocate (Tiger Style §1.9). `deinit`
 //! takes the same `gpa`; the node never stores it.
 //!
@@ -26,7 +31,8 @@
 //! node-owned heap memory, and its log entries point into the entry-byte arena.
 //!
 //! Cost sketch: no I/O, no syscalls. `step` touches the term, vote and role words plus at most
-//! the member list (at most `2 * voters_max + learners_max` ids) to find the sender; effects
+//! the member list (at most `2 * voters_max + learners_max` ids) to find the sender, and the
+//! vote tally (at most `2 * voters_max` ids) when counting a grant; effects
 //! are written into one preallocated array, so the working set stays within a few cache lines.
 
 /// Node configuration. Spelled out at every call site; no defaults (ADR-007).
@@ -130,9 +136,6 @@ pub const InvariantError = log_module.Log.InvariantError || error{
     InvariantInflightOverflow,
 };
 
-/// Effect slots beyond one per peer: truncate, append, save_hard_state, apply, leader_changed.
-const effects_fixed_count: u32 = 5;
-
 pub const Node = struct {
     config: Config,
     role: Role,
@@ -157,6 +160,10 @@ pub const Node = struct {
     bytes_used: u32,
     /// Backing store for `configuration`: `2 * voters_max + learners_max` ids.
     members: []NodeId,
+    /// Voters (self included) that granted this node's vote in the current campaign; only
+    /// `votes[0..votes_len]` is live and it holds no duplicate. `2 * voters_max` long.
+    votes: []NodeId,
+    votes_len: u32,
     /// Effect slots, `peers_max + 5` long; `effects[0..effects_len]` is the last step's output.
     effects: []Effect,
     effects_len: u32,
@@ -173,9 +180,9 @@ pub const Node = struct {
         restore: *const Restore,
         rng: Rng,
     ) InitError!void {
-        assert_config(&config);
+        node_init.assert_config(&config);
         assert(restore.entries.len < std.math.maxInt(u32));
-        try restore_validate(&config, restore);
+        try node_init.restore_validate(&config, restore);
 
         var log: log_module.Log = undefined;
         try log.init(gpa, .{ .entries_max = config.log_entries_max });
@@ -184,15 +191,19 @@ pub const Node = struct {
         const bytes = try gpa.alloc(u8, config.log_bytes_max);
         errdefer gpa.free(bytes);
 
-        const members = try gpa.alloc(NodeId, members_capacity(&config));
+        const members = try gpa.alloc(NodeId, node_init.members_capacity(&config));
         errdefer gpa.free(members);
 
-        const effects = try gpa.alloc(Effect, effects_capacity(&config));
+        const votes = try gpa.alloc(NodeId, node_init.votes_capacity(&config));
+        errdefer gpa.free(votes);
+
+        const effects = try gpa.alloc(Effect, node_init.effects_capacity(&config));
         errdefer gpa.free(effects);
 
         @memset(log.entries, .{ .index = .zero, .term = .zero, .kind = .normal, .data = "" });
         @memset(bytes, 0);
         @memset(members, .none);
+        @memset(votes, .none);
         @memset(effects, .{ .leader_changed = .none });
         node.* = .{
             .config = config,
@@ -203,14 +214,16 @@ pub const Node = struct {
             .commit_index = restore.hard_state.commit_index,
             .applied_index = .zero,
             .log = log,
-            .election_timeout = election_timeout_draw(rng, config.election_ticks),
+            .election_timeout = node_init.election_timeout_draw(rng, config.election_ticks),
             .election_elapsed = 0,
             .rng = rng,
-            .configuration = members_copy(members, &restore.configuration),
+            .configuration = node_init.members_copy(members, &restore.configuration),
             .hard_state_saved = restore.hard_state,
             .bytes = bytes,
             .bytes_used = 0,
             .members = members,
+            .votes = votes,
+            .votes_len = 0,
             .effects = effects,
             .effects_len = 0,
         };
@@ -232,11 +245,13 @@ pub const Node = struct {
         assert(node.members.len > 0);
 
         gpa.free(node.effects);
+        gpa.free(node.votes);
         gpa.free(node.members);
         gpa.free(node.bytes);
         node.log.deinit(gpa);
 
         node.effects = &.{};
+        node.votes = &.{};
         node.members = &.{};
         node.bytes = &.{};
         assert(node.log.entries.len == 0);
@@ -340,24 +355,214 @@ pub const Node = struct {
         assert(head.term != .zero);
 
         node.effects_len = 0;
-        switch (head.term.order(node.term)) {
-            // Stale: dropped without effects. Rejecting replies arrive with items 2A-ii/2B.
-            .lt => {},
-            // Current term: per-kind handlers arrive with items 2A-ii/2B.
-            .eq => {},
-            // A higher term counts only from a member of the configuration.
-            .gt => if (node.is_member(head.from)) node.become_follower(head.term),
+        const member = node.is_member(head.from);
+        switch (message.*) {
+            .request_vote => |*request| node.step_request_vote(request, member),
+            .request_vote_response => |*reply| node.step_vote_response(reply, member),
+            // PreVote (item 2A-iii) must never adopt a term: until it lands, both are dropped.
+            .pre_vote, .pre_vote_response => {},
+            // Not yet handled (replication, snapshots): only the term rules apply.
+            .append_entries,
+            .append_entries_response,
+            .install_snapshot,
+            .install_snapshot_response,
+            => node.step_term_only(head, member),
         }
-        assert(node.term != .zero);
         assert(node.effects_len <= node.effects.len);
+    }
+
+    /// The term rules alone: a stale or current-term message is dropped here, and a higher term
+    /// counts only from a member of the configuration.
+    fn step_term_only(node: *Node, head: *const Header, member: bool) void {
+        assert(head.from != node.config.id);
+        assert(node.effects_len == 0);
+        switch (head.term.order(node.term)) {
+            .lt, .eq => {},
+            .gt => if (member) node.become_follower(head.term),
+        }
+        assert(node.effects_len <= 2);
+    }
+
+    /// Thesis §3.4 / §5.4.1. A non-member earns nothing, at any term. A member at a stale term
+    /// is refused at our term. Otherwise a higher term is adopted without emitting, the grant is
+    /// decided, and the term and vote leave in one `save_hard_state` ahead of the reply.
+    fn step_request_vote(node: *Node, request: *const VoteRequest, member: bool) void {
+        const head = &request.header;
+        assert(head.from != node.config.id);
+        assert(node.effects_len == 0);
+        if (!member) return;
+        if (head.term.order(node.term) == .lt) return node.send_vote_response(head.from, false);
+
+        const bumped = head.term.order(node.term) == .gt;
+        const leader_before = if (bumped) node.term_adopt(head.term) else NodeId.none;
+        const last = node.log.last_index();
+        const free = node.vote == .none or node.vote == head.from;
+        const grant = free and election.log_up_to_date(
+            last,
+            node.log.term_at(last),
+            request.last_log_index,
+            request.last_log_term,
+        );
+        if (grant) node.vote = head.from;
+        if (grant and !bumped) node.election_reset(); // A bump already restarted the timer.
+        node.emit_hard_state();
+        node.send_vote_response(head.from, grant);
+        if (leader_before != .none) node.emit(.{ .leader_changed = .none });
+
+        assert(node.term.order(head.term) != .lt);
+        assert(node.role != .leader or head.term == node.term);
+    }
+
+    /// Thesis §3.4. A non-member is ignored at any term; a higher term steps down; a stale one
+    /// is dropped; a current-term grant to a candidate is tallied.
+    fn step_vote_response(node: *Node, reply: *const VoteResponse, member: bool) void {
+        const head = &reply.header;
+        assert(head.from != node.config.id);
+        assert(node.effects_len == 0);
+        if (!member) return;
+
+        switch (head.term.order(node.term)) {
+            .lt => {},
+            .gt => node.become_follower(head.term),
+            .eq => if (node.role == .candidate and reply.granted) node.tally_grant(head.from),
+        }
+        assert(node.effects_len <= 2);
+    }
+
+    /// Counts a current-term grant from `from` once, and wins the election at a quorum.
+    fn tally_grant(node: *Node, from: NodeId) void {
+        assert(node.role == .candidate);
+        assert(node.votes_len >= 1);
+        const configuration = &node.configuration;
+        const is_voter = election.contains(configuration.voters, from) or
+            election.contains(configuration.voters_outgoing, from);
+        if (!is_voter) return;
+        if (election.contains(node.votes[0..node.votes_len], from)) return;
+
+        assert(node.votes_len < node.votes.len);
+        node.votes[node.votes_len] = from;
+        node.votes_len += 1;
+        if (node.quorum_held()) node.become_leader();
+    }
+
+    fn quorum_held(node: *const Node) bool {
+        assert(node.role == .candidate);
+        assert(node.votes_len <= node.votes.len);
+        return election.quorum_reached(
+            node.configuration.voters,
+            node.configuration.voters_outgoing,
+            node.votes[0..node.votes_len],
+        );
     }
 
     fn step_tick(node: *Node) void {
         node.effects_len = 0;
         node.election_elapsed +|= 1;
-        // The election itself is item 2A-ii; until then a tick only counts.
-        assert(node.effects_len == 0);
         assert(node.election_timeout >= node.config.election_ticks);
+        if (node.role == .leader) return;
+        if (node.election_elapsed < node.election_timeout) return;
+        const configuration = &node.configuration;
+        const voter = election.contains(configuration.voters, node.config.id) or
+            election.contains(configuration.voters_outgoing, node.config.id);
+        // A node already at the largest term cannot go higher: it waits (a leader or a
+        // vote can only come from a peer), rather than wrapping the term.
+        const term_exhausted = @intFromEnum(node.term) == std.math.maxInt(u64);
+        // A learner or a node outside the configuration waits; it never campaigns.
+        if (voter and !term_exhausted) node.campaign();
+        assert(node.effects_len <= node.effects.len);
+    }
+
+    /// Starts an election: next term, vote for self, a fresh timer and tally, one
+    /// `save_hard_state`, then a `request_vote` to every other voter. A lone voter wins at once.
+    fn campaign(node: *Node) void {
+        assert(node.role != .leader);
+        assert(node.effects_len == 0);
+
+        const leader_before = node.leader;
+        node.term = election.term_next(node.term);
+        node.vote = node.config.id;
+        node.role = .candidate;
+        node.leader = .none;
+        node.election_reset();
+        node.votes[0] = node.config.id;
+        node.votes_len = 1;
+        node.emit_hard_state();
+        if (node.quorum_held()) return node.become_leader();
+
+        node.send_vote_requests();
+        if (leader_before != .none) node.emit(.{ .leader_changed = .none });
+        assert(node.role == .candidate);
+        assert(node.effects_len >= 2);
+    }
+
+    /// One `request_vote` to each voter of both sets other than self, none twice, no learner.
+    fn send_vote_requests(node: *Node) void {
+        const last = node.log.last_index();
+        const configuration = &node.configuration;
+        assert(node.role == .candidate);
+        assert(node.vote == node.config.id);
+        for (configuration.voters) |peer| {
+            if (peer != node.config.id) node.send_vote_request(peer, last);
+        }
+        for (configuration.voters_outgoing) |peer| {
+            if (peer == node.config.id) continue;
+            if (election.contains(configuration.voters, peer)) continue;
+            node.send_vote_request(peer, last);
+        }
+    }
+
+    fn send_vote_request(node: *Node, to: NodeId, last: Index) void {
+        assert(to != node.config.id);
+        assert(node.role == .candidate);
+        node.emit(.{ .send = .{ .request_vote = .{
+            .header = node.header_to(to),
+            .last_log_index = last,
+            .last_log_term = node.log.term_at(last),
+        } } });
+    }
+
+    fn send_vote_response(node: *Node, to: NodeId, granted: bool) void {
+        assert(to != node.config.id);
+        assert(!granted or node.vote == to);
+        node.emit(.{ .send = .{ .request_vote_response = .{
+            .header = node.header_to(to),
+            .granted = granted,
+        } } });
+    }
+
+    fn header_to(node: *const Node, to: NodeId) Header {
+        assert(to != .none);
+        assert(node.term != .zero);
+        return .{
+            .protocol_version = node.config.protocol_version,
+            .term = node.term,
+            .from = node.config.id,
+            .to = to,
+        };
+    }
+
+    /// Wins the election: leader at the current term, an empty `.normal` entry appended (§5.4.2),
+    /// then `leader_changed(self)`. If the log has no free slot the entry is skipped and the node
+    /// still leads: it cannot commit earlier terms until a proposal fits, and the driver sees
+    /// the missing `append` as it sees any full log. Replication (2B) revisits this.
+    fn become_leader(node: *Node) void {
+        assert(node.role == .candidate);
+        assert(node.vote == node.config.id);
+
+        node.role = .leader;
+        node.leader = node.config.id;
+        const count_before = node.log.count;
+        node.log_append(node.term, .normal, "") catch |err| switch (err) {
+            error.LogFull => {},
+        };
+        const count_after = node.log.count;
+        if (count_after > count_before) {
+            node.emit(.{ .append = node.log.entries[count_before..count_after] });
+        }
+        node.emit(.{ .leader_changed = node.config.id });
+
+        assert(node.role == .leader);
+        assert(node.leader == node.config.id);
     }
 
     fn step_propose(node: *Node, data: []const u8) ProposeError!void {
@@ -381,12 +586,7 @@ pub const Node = struct {
         assert(new_term.order(node.term) == .gt);
         assert(node.effects_len == 0);
 
-        const leader_before = node.leader;
-        node.term = new_term;
-        node.vote = .none;
-        node.role = .follower;
-        node.leader = .none;
-        node.election_reset();
+        const leader_before = node.term_adopt(new_term);
         node.emit_hard_state();
         if (leader_before != .none) node.emit(.{ .leader_changed = .none });
 
@@ -395,9 +595,29 @@ pub const Node = struct {
         assert(node.effects_len >= 1);
     }
 
+    /// Adopts a strictly higher `new_term` in memory only: follower, vote cleared, leader
+    /// unknown, timer restarted. Emits nothing, so the caller can still decide a vote and
+    /// persist term and vote together. Returns the leader known before.
+    fn term_adopt(node: *Node, new_term: Term) NodeId {
+        assert(new_term.order(node.term) == .gt);
+        assert(node.effects_len == 0);
+
+        const leader_before = node.leader;
+        node.term = new_term;
+        node.vote = .none;
+        node.role = .follower;
+        node.leader = .none;
+        node.election_reset();
+
+        assert(node.role == .follower);
+        assert(node.vote == .none);
+        return leader_before;
+    }
+
     fn election_reset(node: *Node) void {
         node.election_elapsed = 0;
-        node.election_timeout = election_timeout_draw(node.rng, node.config.election_ticks);
+        const ticks = node.config.election_ticks;
+        node.election_timeout = node_init.election_timeout_draw(node.rng, ticks);
         assert(node.election_elapsed == 0);
         assert(node.election_timeout < 2 * @as(u64, node.config.election_ticks));
     }
@@ -467,96 +687,20 @@ pub const Node = struct {
     }
 };
 
-/// Asserts the `Config` contract of ADR-007: a caller's bug, never a returned error.
-fn assert_config(config: *const Config) void {
-    assert(config.id != .none);
-    assert(config.protocol_version >= types.protocol_version_min);
-    assert(config.protocol_version <= types.protocol_version_current);
-    assert(config.heartbeat_ticks >= 1);
-    assert(config.heartbeat_ticks < config.election_ticks);
-    assert(config.voters_max >= 1);
-    assert(config.voters_max <= types.voters_max);
-    assert(config.learners_max <= types.learners_max);
-    assert(config.inflight_max > 0);
-    assert(config.log_entries_max > 0);
-}
-
-/// `peers_max = 2 * voters_max + learners_max - 1`: joint-sized so Phase 4 changes no size.
-fn effects_capacity(config: *const Config) u32 {
-    const peers_max = 2 * config.voters_max + config.learners_max - 1;
-    assert(peers_max >= 1);
-    return peers_max + effects_fixed_count;
-}
-
-fn members_capacity(config: *const Config) u32 {
-    const result = 2 * config.voters_max + config.learners_max;
-    assert(result >= 2);
-    return result;
-}
-
-/// `t + rng.uint_less_than(t)`: exactly one draw, a value in `[t, 2t)`.
-fn election_timeout_draw(rng: Rng, election_ticks: u32) u32 {
-    assert(election_ticks > 0);
-    const drawn: u32 = @intCast(rng.uint_less_than(election_ticks));
-    assert(drawn < election_ticks);
-    return election_ticks + drawn;
-}
-
-/// Pure data check of `Restore`; allocates nothing. `RestoreLogFull` is decided at copy time.
-fn restore_validate(config: *const Config, restore: *const Restore) InitError!void {
-    const configuration = &restore.configuration;
-    try configuration.validate();
-    if (configuration.voters.len > config.voters_max) return error.ConfVotersTooMany;
-    if (configuration.voters_outgoing.len > config.voters_max) return error.ConfVotersTooMany;
-    if (configuration.learners.len > config.learners_max) return error.ConfLearnersTooMany;
-
-    const hard_state = &restore.hard_state;
-    if (hard_state.vote != .none and hard_state.term == .zero) return error.RestoreInconsistent;
-    var previous_term: Term = .zero;
-    for (restore.entries, 0..) |entry, i| {
-        if (@intFromEnum(entry.index) != i + 1) return error.RestoreInconsistent;
-        if (entry.term.order(previous_term) == .lt) return error.RestoreInconsistent;
-        if (entry.term.order(hard_state.term) == .gt) return error.RestoreInconsistent;
-        previous_term = entry.term;
-    }
-    if (@intFromEnum(hard_state.commit_index) > restore.entries.len) {
-        return error.RestoreInconsistent;
-    }
-    assert(@intFromEnum(hard_state.commit_index) <= restore.entries.len);
-    assert(previous_term.order(hard_state.term) != .gt);
-}
-
-/// Copies `source` into `members` (voters, then outgoing voters, then learners) and returns the
-/// view over the copy. Precondition: `members` holds `2 * voters_max + learners_max` ids and
-/// `source` fits the `Config` caps (checked by `restore_validate`).
-fn members_copy(members: []NodeId, source: *const Configuration) Configuration {
-    const voters_end = source.voters.len;
-    const outgoing_end = voters_end + source.voters_outgoing.len;
-    const learners_end = outgoing_end + source.learners.len;
-    assert(learners_end <= members.len);
-    assert(voters_end > 0);
-
-    @memcpy(members[0..voters_end], source.voters);
-    @memcpy(members[voters_end..outgoing_end], source.voters_outgoing);
-    @memcpy(members[outgoing_end..learners_end], source.learners);
-    return .{
-        .voters = members[0..voters_end],
-        .voters_outgoing = members[voters_end..outgoing_end],
-        .learners = members[outgoing_end..learners_end],
-    };
-}
-
 test {
     _ = @import("node_test.zig");
     _ = @import("node_step_test.zig");
+    _ = @import("node_election_test.zig");
     _ = @import("node_invariants_test.zig");
 }
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const election = @import("election.zig");
 const interfaces = @import("../interfaces.zig");
 const log_module = @import("../log.zig");
+const node_init = @import("node_init.zig");
 const types = @import("../types.zig");
 
 const ConfError = types.ConfError;
@@ -564,9 +708,12 @@ const Configuration = types.Configuration;
 const Entry = types.Entry;
 const EntryKind = types.EntryKind;
 const HardState = types.HardState;
+const Header = types.Header;
 const Index = types.Index;
 const Message = types.Message;
 const MessageError = types.MessageError;
 const NodeId = types.NodeId;
 const Rng = interfaces.Rng;
 const Term = types.Term;
+const VoteRequest = types.VoteRequest;
+const VoteResponse = types.VoteResponse;

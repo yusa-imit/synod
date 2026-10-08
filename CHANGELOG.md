@@ -21,6 +21,13 @@ All notable changes to this project are documented in this file. Format follows
   `src/raft/node_invariants_test.zig`: construction, term-rule, rejection, seeded-stream, fuzz
   and invariant tests for `Node`.
 - `docs/PRD.md` §4.2 points at ADR-007 as the authoritative `Node`/`Effect` contract.
+- `src/raft/node.zig` election (plan 003 item 2A-ii): a tick past the randomized timeout starts
+  a campaign (term + 1, self vote, one `save_hard_state`, `request_vote` to each other voter);
+  `request_vote` is granted once per term when the candidate's log is up to date (§5.4.1) and
+  refused otherwise; `request_vote_response` is tallied against a joint-shaped quorum and a
+  winner appends an empty entry and emits `leader_changed`. `src/raft/election.zig` holds the
+  pure helpers and `src/raft/node_init.zig` the init-time helpers moved out of `node.zig`.
+  `src/raft/node_election_test.zig` covers it, including a seeded model-based stream.
 
 ### Changed
 

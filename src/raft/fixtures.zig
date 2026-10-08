@@ -57,8 +57,15 @@ pub fn fill_entries(buffer: []Entry, count: u32, term_value: u64) []const Entry 
 pub const SplitMix = struct {
     state: u64,
     draws: u32 = 0,
+    /// When set, every draw returns this word: `0` makes `uint_less_than(t)` yield `0` (timeout
+    /// `t`), `maxInt(u64)` yields `t - 1` (timeout `2t - 1`), the two ends of `[t, 2t)`.
+    forced: ?u64 = null,
 
     pub fn next_u64(self: *SplitMix) u64 {
+        if (self.forced) |word| {
+            self.draws += 1;
+            return word;
+        }
         self.state +%= 0x9e3779b97f4a7c15;
         var z = self.state;
         z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
@@ -99,8 +106,32 @@ pub fn effects_capacity(node_config: Config) u32 {
 }
 
 pub fn restore_of(hard_state: HardState, entries: []const Entry) Restore {
-    return .{ .hard_state = hard_state, .entries = entries, .configuration = configuration };
+    return restore_with(configuration, hard_state, entries);
 }
+
+pub fn restore_with(
+    cluster: Configuration,
+    hard_state: HardState,
+    entries: []const Entry,
+) Restore {
+    return .{ .hard_state = hard_state, .entries = entries, .configuration = cluster };
+}
+
+/// Five voters {1..5}, no learners, for quorum-of-three tests. The node under test is id 1.
+pub const voters5 = [_]NodeId{ node_id(1), node_id(2), node_id(3), node_id(4), node_id(5) };
+
+pub const configuration5: Configuration = .{
+    .voters = &voters5,
+    .voters_outgoing = &.{},
+    .learners = &.{},
+};
+
+/// `config` with room for five voters per set.
+pub const config5: Config = blk: {
+    var result = config;
+    result.voters_max = 5;
+    break :blk result;
+};
 
 pub const base_entries = [_]Entry{ entry(1, 1, "a"), entry(2, 2, "bc"), entry(3, 3, "") };
 
@@ -125,6 +156,19 @@ pub const Rig = struct {
         seed: u64,
     ) node_module.InitError!void {
         rig.rng = .{ .state = seed };
+        try rig.node.init(gpa, node_config, restore, Rng.init(&rig.rng));
+    }
+
+    /// Like `init`, but every `Rng` draw returns `forced` (see `SplitMix.forced`): the election
+    /// timeout is exactly `t` for `0` and `2t - 1` for `maxInt(u64)`.
+    pub fn init_fixed(
+        rig: *Rig,
+        gpa: std.mem.Allocator,
+        node_config: Config,
+        restore: *const Restore,
+        forced: u64,
+    ) node_module.InitError!void {
+        rig.rng = .{ .state = 0, .forced = forced };
         try rig.node.init(gpa, node_config, restore, Rng.init(&rig.rng));
     }
 
@@ -179,6 +223,21 @@ pub fn vote_request(from: u64, to: u64, term_value: u64) Message {
         .header = header_of(from, to, term_value),
         .last_log_index = .zero,
         .last_log_term = .zero,
+    } };
+}
+
+/// A `request_vote` claiming the candidate's log ends at (`last_index`, `last_term`).
+pub fn vote_request_at(
+    from: u64,
+    to: u64,
+    term_value: u64,
+    last_index: u64,
+    last_term: u64,
+) Message {
+    return .{ .request_vote = .{
+        .header = header_of(from, to, term_value),
+        .last_log_index = idx(last_index),
+        .last_log_term = term(last_term),
     } };
 }
 
