@@ -28,6 +28,13 @@ All notable changes to this project are documented in this file. Format follows
   winner appends an empty entry and emits `leader_changed`. `src/raft/election.zig` holds the
   pure helpers and `src/raft/node_init.zig` the init-time helpers moved out of `node.zig`.
   `src/raft/node_election_test.zig` covers it, including a seeded model-based stream.
+- `src/raft/node.zig` PreVote (plan 003 item 2A-iii): an election timeout makes a voter a
+  `pre_candidate` that sends `pre_vote` at term + 1 without bumping its term, voting, or
+  persisting; a voter grants only if the asker's would-be term is higher, its log is up to date,
+  and no leader was heard within `election_ticks`. A joint quorum of grants starts the real
+  campaign. A lone voter still campaigns directly. A learner's `pre_vote` is ignored.
+  `src/raft/node_prevote_test.zig` covers it, including a partitioned node rejoining without
+  deposing the leader.
 
 ### Changed
 

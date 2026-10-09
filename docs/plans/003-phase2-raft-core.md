@@ -39,7 +39,7 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       computed joint-shaped from day one (ADR-005) though Phase 2 never enters joint. *Verify:*
       hand-driven 3- and 5-node tests: one leader, split vote retries, stale log refused.
       `blocked_by: none`
-- [ ] **2A-iii PreVote.** Split from 2A-ii: a second message pair and role. A pre-candidate bumps
+- [x] **2A-iii PreVote.** Split from 2A-ii: a second message pair and role. A pre-candidate bumps
       no term; a node that heard from a leader within the minimum timeout refuses (thesis
       §9.6). Why: a partitioned node rejoining must not depose a healthy leader. *Verify:*
       test where an isolated node ticks 100 timeouts and rejoins — cluster term unchanged,

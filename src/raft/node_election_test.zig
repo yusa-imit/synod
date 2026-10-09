@@ -4,8 +4,10 @@
 //! The expected values come from the Raft thesis (§3.4 elections, §5.4.1 up-to-date log, §5.4.2
 //! the new leader's empty entry) and the ADR-007 effect order, never from `node.zig`. Every
 //! step is followed by `check_invariants()` and an effect-order check (`recv`, `tick`); every
-//! vote that leaves the node is preceded by its `save_hard_state` in the same view. PreVote is
-//! out of scope: `pre_vote` messages stay ignored.
+//! vote that leaves the node is preceded by its `save_hard_state` in the same view. Since plan
+//! 003 item 2A-iii a follower's election timeout starts a pre-vote round (thesis 9.6, tested in
+//! `node_prevote_test.zig`); `campaign` here runs that round to its end so these tests keep
+//! their expectations about the real campaign.
 //!
 //! Timing is pinned with a forced `Rng` word: `0` gives the timeout `t = 10`, `maxInt(u64)`
 //! gives `2t - 1 = 19`, the two ends of `[t, 2t)`. Streams are reproducible from their seed,
@@ -79,10 +81,37 @@ fn recv(rig: *Rig, message: Message) !Effects {
     return effects;
 }
 
-/// Ticks a follower (forced `low`, timer at zero) up to and including its election tick.
+/// Ticks a follower (forced `low`, timer at zero) up to and including its election tick, then
+/// grants the pre-vote round and returns the effects of the step that turned it candidate.
 fn campaign(rig: *Rig) !Effects {
     try ticks_quiet(rig, rig.node.config.election_ticks - 1);
-    return tick(rig);
+    return finish_campaign(rig, try tick(rig));
+}
+
+/// `election_effects` is what the election tick emitted. A direct campaign (candidate retry,
+/// lone voter) is returned as is. A pre-vote round must be a bare `pre_vote` fan-out; peers then
+/// grant it in turn (term + 1 header) until the node turns candidate, and the effects of that
+/// last response are returned: `save_hard_state` then `request_vote` to each peer.
+fn finish_campaign(rig: *Rig, election_effects: Effects) !Effects {
+    var targets: [8]u64 = undefined;
+    var count: usize = 0;
+    var would_be: u64 = 0;
+    for (election_effects.items) |effect| switch (effect) {
+        .send => |message| if (message == .pre_vote) {
+            targets[count] = @intFromEnum(message.header().to);
+            would_be = @intFromEnum(message.header().term);
+            count += 1;
+        },
+        else => {},
+    };
+    if (count == 0) return election_effects;
+    try testing.expectEqual(Role.pre_candidate, rig.node.status().role);
+    for (targets[0..count]) |peer| {
+        const effects = try recv(rig, fixtures.pre_vote_response(peer, 1, would_be, true));
+        if (rig.node.status().role == .candidate) return effects;
+        try expect_quiet(effects);
+    }
+    return error.TestUnexpectedResult;
 }
 
 fn expect_quiet(effects: Effects) !void {
@@ -198,7 +227,7 @@ fn elect_three(rig: *Rig) !void {
 // Starting an election
 // ---------------------------------------------------------------------------------------
 
-test "election: below the timeout a tick emits nothing, at it the election starts (both ends)" {
+test "election: below the timeout a tick emits nothing, at it the pre-vote starts (both ends)" {
     const bounds = [_]struct { forced: u64, timeout: u32 }{
         .{ .forced = low, .timeout = 10 },
         .{ .forced = high, .timeout = 19 },
@@ -211,8 +240,8 @@ test "election: below the timeout a tick emits nothing, at it the election start
         try ticks_quiet(&rig, bound.timeout - 1);
         try expect_status(&rig, .{ .role = .follower, .term = 0, .vote = 0 });
         const effects = try tick(&rig);
-        try expect_election(effects, 1, .{ .index = 0, .term = 0 }, &.{ 2, 3 });
-        try expect_status(&rig, .{ .role = .candidate, .term = 1, .vote = 1 });
+        try fixtures.expect_pre_vote(effects, 1, 0, 0, &.{ 2, 3 }, false);
+        try expect_status(&rig, .{ .role = .pre_candidate, .term = 0, .vote = 0 });
         // One draw at init, exactly one more for the election timer reset.
         try testing.expectEqual(@as(u32, 2), rig.rng.draws);
     }
@@ -241,7 +270,7 @@ test "election: a candidate whose timer expires again retries one term higher af
         try expect_election(effects, next_term, .{ .index = 0, .term = 0 }, &.{ 2, 3 });
         try expect_status(&rig, .{ .role = .candidate, .term = next_term, .vote = 1 });
     }
-    try testing.expectEqual(@as(u32, 5), rig.rng.draws);
+    try testing.expectEqual(@as(u32, 6), rig.rng.draws); // init, pre-vote, campaign, 3 retries
 }
 
 test "election: a learner or a non-member never campaigns however long it waits" {
@@ -572,8 +601,7 @@ test "election: a granted vote restarts the election timer with one draw, a refu
     try expect_reply(granted, 2, 3, true);
     try testing.expectEqual(@as(u32, 2), rig.rng.draws);
     // Without the reset the very next tick would fire; with it a full timeout is needed.
-    try ticks_quiet(&rig, config.election_ticks - 1);
-    const effects = try tick(&rig);
+    const effects = try campaign(&rig);
     try expect_election(effects, 4, .{ .index = 3, .term = 3 }, &.{ 2, 3 });
 }
 
@@ -586,7 +614,7 @@ test "election: a refused request leaves the election timer running" {
     const refused = try recv(&rig, fixtures.vote_request_at(3, 1, 3, 3, 3));
     try expect_reply_only(refused, 3, 3, false);
     try testing.expectEqual(@as(u32, 1), rig.rng.draws);
-    const effects = try tick(&rig);
+    const effects = try finish_campaign(&rig, try tick(&rig));
     try expect_election(effects, 4, .{ .index = 3, .term = 3 }, &.{ 2, 3 });
 }
 
@@ -660,30 +688,25 @@ test "election: a higher-term pre_vote from a member adopts no term and persists
     try rig.init_fixed(testing.allocator, config, &logged, low);
     defer rig.deinit(testing.allocator);
 
-    const probe: Message = .{ .pre_vote = .{
-        .header = fixtures.header_of(2, 1, 9),
-        .last_log_index = idx(3),
-        .last_log_term = term(3),
-    } };
     const before = rig.node.status();
-    try expect_quiet(try recv(&rig, probe));
+    const reply = try recv(&rig, fixtures.pre_vote_at(2, 1, 9, 3, 3));
+    try fixtures.expect_pre_vote_reply(reply, 2, 9, true);
     try testing.expectEqual(before, rig.node.status());
 }
 
-test "election: pre_vote messages stay ignored and never consume the vote" {
+test "election: a pre_vote leaves the vote free and the election timer running" {
     var rig: Rig = undefined;
     try rig.init_fixed(testing.allocator, config, &logged, low);
     defer rig.deinit(testing.allocator);
 
-    const probe: Message = .{ .pre_vote = .{
-        .header = fixtures.header_of(2, 1, 3),
-        .last_log_index = idx(3),
-        .last_log_term = term(3),
-    } };
+    try ticks_quiet(&rig, config.election_ticks - 1);
     const before = rig.node.status();
-    try expect_quiet(try recv(&rig, probe));
+    const reply = try recv(&rig, fixtures.pre_vote_at(2, 1, 4, 3, 3));
+    try fixtures.expect_pre_vote_reply(reply, 2, 4, true);
     try testing.expectEqual(before, rig.node.status());
     try testing.expectEqual(@as(u32, 1), rig.rng.draws);
+    // The very next tick still fires: the pre-vote grant did not restart the timer.
+    try fixtures.expect_pre_vote(try tick(&rig), 4, 3, 3, &.{ 2, 3 }, false);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -823,7 +846,11 @@ test "election: the own vote counts only in the sets that contain the candidate"
 const Expect = struct {
     saves: u32 = 0,
     vote_requests: u32 = 0,
+    pre_votes: u32 = 0,
     reply: ?bool = null,
+    /// A `pre_vote_response` is expected: its `granted` flag and header term.
+    pre_reply: ?bool = null,
+    pre_reply_term: u64 = 0,
     appends: u32 = 0,
     leader_changed: u32 = 0,
 };
@@ -840,6 +867,8 @@ const Model = struct {
     elapsed: u32 = 0,
     /// Per peer, the response already received this term: 0 none, 1 rejected, 2 granted.
     resp: [6]u8 = [_]u8{0} ** 6,
+    /// Per peer, whether a granted pre-vote response was counted in this round.
+    pre_resp: [6]bool = [_]bool{false} ** 6,
 
     fn adopt(model: *Model, new_term: u64, want: *Expect) void {
         model.term = new_term;
@@ -849,6 +878,17 @@ const Model = struct {
         model.leader = 0;
         model.elapsed = 0;
         model.resp = [_]u8{0} ** 6;
+        model.pre_resp = [_]bool{false} ** 6;
+    }
+
+    fn campaign(model: *Model, want: *Expect) void {
+        model.term += 1;
+        model.vote = 1;
+        model.role = .candidate;
+        model.elapsed = 0;
+        model.resp = [_]u8{0} ** 6;
+        model.pre_resp = [_]bool{false} ** 6;
+        want.vote_requests = 4;
     }
 
     fn persisted(model: *Model, want: *Expect) void {
@@ -861,13 +901,13 @@ const Model = struct {
     fn tick(model: *Model) Expect {
         var want: Expect = .{};
         model.elapsed += 1;
-        if (model.role != .leader and model.elapsed >= config.election_ticks) {
-            model.term += 1;
-            model.vote = 1;
-            model.role = .candidate;
+        if (model.role == .candidate and model.elapsed >= config.election_ticks) {
+            model.campaign(&want);
+        } else if (model.role != .leader and model.elapsed >= config.election_ticks) {
+            model.role = .pre_candidate; // term and vote untouched, a fresh tally
             model.elapsed = 0;
-            model.resp = [_]u8{0} ** 6;
-            want.vote_requests = 4;
+            model.pre_resp = [_]bool{false} ** 6;
+            want.pre_votes = 4;
         }
         model.persisted(&want);
         return want;
@@ -888,6 +928,31 @@ const Model = struct {
                 model.elapsed = 0;
             }
             want.reply = grant;
+        }
+        model.persisted(&want);
+        return want;
+    }
+
+    /// A `pre_vote` changes nothing; the reply is the model of the grant rule.
+    fn pre_request(model: *Model, request_term: u64, last: Position) Expect {
+        const newer = last.term > model.last_term;
+        const longer = last.term == model.last_term and last.index >= model.last_index;
+        const grant = request_term > model.term and (newer or longer) and model.role != .leader;
+        return .{
+            .pre_reply = grant,
+            .pre_reply_term = if (grant) request_term else model.term,
+        };
+    }
+
+    fn pre_response(model: *Model, from: u64, response_term: u64, granted: bool) Expect {
+        var want: Expect = .{};
+        if (from == 9 or model.role != .pre_candidate) return want;
+        if (!granted and response_term > model.term) model.adopt(response_term, &want);
+        if (granted and response_term == model.term + 1) {
+            model.pre_resp[from] = true;
+            var votes: u32 = 1;
+            for (model.pre_resp) |counted| votes += @intFromBool(counted);
+            if (votes >= 3) model.campaign(&want);
         }
         model.persisted(&want);
         return want;
@@ -920,6 +985,18 @@ fn expect_matches(model: *const Model, rig: *Rig, effects: Effects, want: Expect
     try testing.expectEqual(want.appends, fixtures.count_effects(effects, .append));
     try testing.expectEqual(want.leader_changed, fixtures.count_effects(effects, .leader_changed));
     try testing.expectEqual(want.vote_requests, count_sends(effects, .request_vote));
+    try testing.expectEqual(want.pre_votes, count_sends(effects, .pre_vote));
+    const pre_replies: u32 = if (want.pre_reply == null) 0 else 1;
+    try testing.expectEqual(pre_replies, count_sends(effects, .pre_vote_response));
+    if (want.pre_reply) |granted| {
+        for (effects.items) |effect| switch (effect) {
+            .send => |message| if (message == .pre_vote_response) {
+                try testing.expectEqual(granted, message.pre_vote_response.granted);
+                try testing.expectEqual(term(want.pre_reply_term), message.header().term);
+            },
+            else => {},
+        };
+    }
     const replies: u32 = if (want.reply == null) 0 else 1;
     try testing.expectEqual(replies, count_sends(effects, .request_vote_response));
     if (want.reply) |granted| {
@@ -963,7 +1040,8 @@ fn draw_position(random: std.Random, model: *const Model, request_term: u64) Pos
 }
 
 fn stream_step(rig: *Rig, model: *Model, random: std.Random) !void {
-    const roll = random.uintLessThan(u32, 10);
+    const roll = random.uintLessThan(u32, 12);
+    if (roll >= 10) return pre_vote_step(rig, model, random, roll == 10);
     if (roll < 3 and model.role != .leader) {
         const want = model.tick();
         try expect_matches(model, rig, try tick(rig), want);
@@ -987,6 +1065,27 @@ fn stream_step(rig: *Rig, model: *Model, random: std.Random) !void {
         const want = model.response(from, response_term, granted);
         try expect_matches(model, rig, try recv(rig, message), want);
     }
+}
+
+/// One pre-vote input: a `pre_vote` request (`request`) or a `pre_vote_response`.
+fn pre_vote_step(rig: *Rig, model: *Model, random: std.Random, request: bool) !void {
+    const from = draw_peer(random);
+    var message_term = draw_term(random, model);
+    if (from == 9) message_term = @min(message_term, model.term);
+    if (request) {
+        const last = draw_position(random, model, message_term);
+        const message = fixtures.pre_vote_at(from, 1, message_term, last.index, last.term);
+        const want: Expect = if (from == 9) .{} else model.pre_request(message_term, last);
+        return expect_matches(model, rig, try recv(rig, message), want);
+    }
+    // Mostly the response a pre-candidate waits for: granted, at the would-be term.
+    if (model.role == .pre_candidate and random.uintLessThan(u32, 4) != 0) {
+        message_term = model.term + 1;
+    }
+    const granted = random.uintLessThan(u32, 4) != 0;
+    const message = fixtures.pre_vote_response(from, 1, message_term, granted);
+    const want = model.pre_response(from, message_term, granted);
+    try expect_matches(model, rig, try recv(rig, message), want);
 }
 
 fn stream_run(seed: u64, steps: u32) !void {
