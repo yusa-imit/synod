@@ -49,12 +49,23 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       backtrack from a `Conflict`. Internal (not re-exported from `root.zig`), so Phase 4 can
       add a `snapshot` state without a MAJOR. *Verify:* unit tests plus a seeded test against
       a naive reference; `match < next` asserted on both update paths. `blocked_by: none`
-- [ ] **2B-i Leader replication — propose, AppendEntries, heartbeats.** `propose` appends to the
-      leader log and emits persist; `tick` sends heartbeats; batches bounded by
-      `Message.Limits`; responses update `progress` (accepted → `match`, rejected → backtrack).
-      *Verify:* leader + 2 hand-stepped followers: a proposal reaches all logs; a rejection
-      backs `next` up to the conflict run in one round trip. `blocked_by: none`
-- [ ] **2B-ii Follower log matching.** Split from 2B-i: the receive side. Consistency check with
+- [ ] **2B-i-a Leader send side — progress init, propose, heartbeats.** Split from 2B-i (the
+      plan's sizing risk; `node.zig` is at its 800-line cap, so the leader logic lives in a new
+      `raft/leader.zig`). On election a leader builds one `Progress` per other voter
+      (`Progress.init(last_index, inflight_max)`); `propose` appends to the leader log and emits
+      persist; `tick` and `propose` send `append_entries` to each peer whose `can_send()`,
+      batches bounded by `Message.Limits`, each round recorded (prev, last_sent, round id) for
+      2B-i-b; a heartbeat round that times out calls `on_timeout`. *Verify:* leader + 2
+      hand-stepped followers: a proposal produces one `append_entries` per peer with the right
+      `prev_log_index`/entries; the window stops sends at `inflight_max`; `check_invariants()`
+      covers `InvariantProgressOrder`/`InvariantInflightOverflow`. `blocked_by: none`
+- [ ] **2B-i-b Leader response side — accepted, rejected, stale rounds.** Responses are matched
+      to the recorded round (unknown, duplicate, wrong-term or timed-out rounds dropped);
+      `accepted` must satisfy `prev <= matched <= last_sent` before `Progress.on_accepted`;
+      `rejected` calls `on_rejected` and resends from the backtracked `next`. *Verify:* a
+      rejection backs `next` up to the conflict run in one round trip; a response from a
+      timed-out round never touches the new window. `blocked_by: none`
+- [ ] **2B-ii Follower log matching.** Split from 2B-i-a: the receive side. Consistency check with
       `Log.conflict_at`, truncate only a conflicting suffix (never committed entries, asserted),
       append, reply `accepted(match)` or `rejected(Conflict)`. *Verify:* Raft paper Figure 7
       follower logs (a)–(f) each converge to the leader's log; `log.validate()` after each step.
