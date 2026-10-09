@@ -35,6 +35,12 @@ All notable changes to this project are documented in this file. Format follows
   campaign. A lone voter still campaigns directly. A learner's `pre_vote` is ignored.
   `src/raft/node_prevote_test.zig` covers it, including a partitioned node rejoining without
   deposing the leader.
+- `src/raft/progress.zig` (plan 003 item 2C): the internal per-follower replication tracker,
+  not re-exported. `match`/`next`, `probe` and `replicate` states, an in-flight window fixed at
+  `init`, `on_send`/`on_accepted`/`on_rejected` with stale-response filtering, fast backtrack
+  from a `Conflict`, `on_timeout` to reopen a window after lost messages, and
+  `check_invariants` (`InvariantProgressOrder`, `InvariantInflightOverflow`).
+  `src/raft/progress_test.zig` covers it, including a seeded stream against a naive reference.
 
 ### Changed
 
