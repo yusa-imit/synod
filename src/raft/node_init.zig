@@ -99,8 +99,56 @@ pub fn members_copy(members: []NodeId, source: *const Configuration) Configurati
     };
 }
 
+/// Whether `id` votes in either set of the node's configuration; a learner does not.
+pub fn is_voter(node: *const Node, id: NodeId) bool {
+    assert(id != .none);
+    assert(id != node.config.id);
+    const sets = &node.configuration;
+    return election.is_voter(sets.voters, sets.voters_outgoing, id);
+}
+
+pub fn check_invariants_indices(node: *const Node) InvariantError!void {
+    const last_index = node.log.last_index();
+    if (node.commit_index.order(last_index) == .gt) return error.InvariantCommitBeyondLog;
+    if (node.applied_index.order(node.commit_index) == .gt) {
+        return error.InvariantAppliedBeyondCommit;
+    }
+    if (node.term.order(node.log.term_at(last_index)) == .lt) {
+        return error.InvariantTermBehindLog;
+    }
+    assert(node.commit_index.order(last_index) != .gt);
+    assert(node.applied_index.order(last_index) != .gt);
+}
+
+pub fn check_invariants_election(node: *const Node) InvariantError!void {
+    if (node.vote != .none and node.term == .zero) return error.InvariantVoteWithoutTerm;
+    const leads = node.role == .leader;
+    if (leads != (node.leader == node.config.id)) return error.InvariantLeaderRole;
+    if (node.role == .pre_candidate and node.leader != .none) return error.InvariantLeaderRole;
+    const ticks: u64 = node.config.election_ticks;
+    if (node.election_timeout < ticks) return error.InvariantElectionTimeout;
+    if (node.election_timeout >= 2 * ticks) return error.InvariantElectionTimeout;
+    assert(leads == (node.leader == node.config.id));
+    assert(node.election_timeout >= node.config.election_ticks);
+}
+
+pub fn check_invariants_bytes(node: *const Node) InvariantError!void {
+    if (node.bytes_used > node.bytes.len) return error.InvariantEntryDataMisplaced;
+    var offset: usize = 0;
+    for (node.log.entries[0..node.log.count]) |entry| {
+        if (entry.data.ptr != node.bytes.ptr + offset) {
+            return error.InvariantEntryDataMisplaced;
+        }
+        offset += entry.data.len;
+    }
+    if (offset != node.bytes_used) return error.InvariantEntryDataMisplaced;
+    assert(offset <= node.bytes.len);
+    assert(offset == node.bytes_used);
+}
+
 const std = @import("std");
 const assert = std.debug.assert;
+const election = @import("election.zig");
 const interfaces = @import("../interfaces.zig");
 const node_module = @import("node.zig");
 const types = @import("../types.zig");
@@ -108,6 +156,8 @@ const types = @import("../types.zig");
 const Config = node_module.Config;
 const Configuration = types.Configuration;
 const InitError = node_module.InitError;
+const InvariantError = node_module.InvariantError;
+const Node = node_module.Node;
 const NodeId = types.NodeId;
 const Restore = node_module.Restore;
 const Rng = interfaces.Rng;

@@ -2,15 +2,17 @@
 //! `Effects`, `Role`, `Status`, the error sets, and `Node` (`init`, `deinit`, `step`, `status`,
 //! `entries`, `check_invariants`).
 //!
-//! Scope (plan 003 items 2A-i and 2A-ii): the skeleton and the election. A node restores from
+//! Scope (plan 003 items 2A-i to 2A-iii): skeleton, election, PreVote. A node restores from
 //! `Restore`, validates and routes every received message, applies the term rules (a higher
 //! term from a known member makes a follower and persists once; a stale term is dropped),
-//! counts ticks, and rejects proposals unless it leads. A tick past the election timeout starts
-//! a campaign; `request_vote` is granted once per term to an up-to-date candidate; granted
-//! `request_vote_response`s are counted against a joint-shaped quorum, and a winner appends the
-//! empty entry of its term (§5.4.2). PreVote, replication (2B) and apply (2C) land later and
-//! extend `step_message`, `step_tick` and `step_propose` without changing a signature. The pure
-//! decisions (up-to-date, quorum) live in `election.zig`.
+//! counts ticks, and rejects proposals unless it leads. An election timeout first runs a
+//! PreVote round (§9.6): a pre-candidate keeps its term and vote, sends `pre_vote` at `term + 1`
+//! and campaigns on a quorum of grants; a voter grants without adopting a term, persisting or
+//! resetting its timer. A lone voter and an expired candidate campaign directly. `request_vote`
+//! is granted once per term to an up-to-date candidate; granted responses are counted against a
+//! joint-shaped quorum, and a winner appends the empty entry of its term (§5.4.2). Replication
+//! (2B) and apply (2C) land later and extend `step_message`, `step_tick` and `step_propose`
+//! without changing a signature. The pure decisions (up-to-date, quorum) live in `election.zig`.
 //!
 //! Invariants: `check_invariants` states them: commit within the log, applied within commit,
 //! the term at least the last entry's term, no vote in term zero, `role == .leader` exactly
@@ -304,47 +306,9 @@ pub const Node = struct {
         assert(node.effects_len <= node.effects.len);
 
         try node.log.validate();
-        try node.check_invariants_indices();
-        try node.check_invariants_election();
-        try node.check_invariants_bytes();
-    }
-
-    fn check_invariants_indices(node: *const Node) InvariantError!void {
-        const last_index = node.log.last_index();
-        if (node.commit_index.order(last_index) == .gt) return error.InvariantCommitBeyondLog;
-        if (node.applied_index.order(node.commit_index) == .gt) {
-            return error.InvariantAppliedBeyondCommit;
-        }
-        if (node.term.order(node.log.term_at(last_index)) == .lt) {
-            return error.InvariantTermBehindLog;
-        }
-        assert(node.commit_index.order(last_index) != .gt);
-        assert(node.applied_index.order(last_index) != .gt);
-    }
-
-    fn check_invariants_election(node: *const Node) InvariantError!void {
-        if (node.vote != .none and node.term == .zero) return error.InvariantVoteWithoutTerm;
-        const leads = node.role == .leader;
-        if (leads != (node.leader == node.config.id)) return error.InvariantLeaderRole;
-        const ticks: u64 = node.config.election_ticks;
-        if (node.election_timeout < ticks) return error.InvariantElectionTimeout;
-        if (node.election_timeout >= 2 * ticks) return error.InvariantElectionTimeout;
-        assert(leads == (node.leader == node.config.id));
-        assert(node.election_timeout >= node.config.election_ticks);
-    }
-
-    fn check_invariants_bytes(node: *const Node) InvariantError!void {
-        if (node.bytes_used > node.bytes.len) return error.InvariantEntryDataMisplaced;
-        var offset: usize = 0;
-        for (node.log.entries[0..node.log.count]) |entry| {
-            if (entry.data.ptr != node.bytes.ptr + offset) {
-                return error.InvariantEntryDataMisplaced;
-            }
-            offset += entry.data.len;
-        }
-        if (offset != node.bytes_used) return error.InvariantEntryDataMisplaced;
-        assert(offset <= node.bytes.len);
-        assert(offset == node.bytes_used);
+        try node_init.check_invariants_indices(node);
+        try node_init.check_invariants_election(node);
+        try node_init.check_invariants_bytes(node);
     }
 
     fn step_message(node: *Node, message: *const Message) StepError!void {
@@ -359,10 +323,15 @@ pub const Node = struct {
         switch (message.*) {
             .request_vote => |*request| node.step_request_vote(request, member),
             .request_vote_response => |*reply| node.step_vote_response(reply, member),
-            // PreVote (item 2A-iii) must never adopt a term: until it lands, both are dropped.
-            .pre_vote, .pre_vote_response => {},
+            // PreVote (thesis §9.6) never adopts a term on the strength of a would-be term.
+            .pre_vote => |*request| node.step_pre_vote(request, member),
+            .pre_vote_response => |*reply| node.step_pre_vote_response(reply, member),
+            // The term rules, then the sender is the leader of our term (replication is 2B).
+            .append_entries => {
+                node.step_term_only(head, member);
+                node.note_leader(head);
+            },
             // Not yet handled (replication, snapshots): only the term rules apply.
-            .append_entries,
             .append_entries_response,
             .install_snapshot,
             .install_snapshot_response,
@@ -381,6 +350,23 @@ pub const Node = struct {
             .gt => if (member) node.become_follower(head.term),
         }
         assert(node.effects_len <= 2);
+    }
+
+    /// A member's `append_entries` at our term names it the leader: a candidate (or pre-candidate)
+    /// yields, the timer restarts, and `leader_changed` is emitted when the leader is news.
+    fn note_leader(node: *Node, head: *const Header) void {
+        assert(head.from != node.config.id);
+        assert(node.effects_len <= 2);
+        // One leader per term: only a voter may claim it, and the first claim stands.
+        if (!node_init.is_voter(node, head.from) or head.term != node.term) return;
+        if (node.role == .leader or (node.leader != .none and node.leader != head.from)) return;
+
+        node.role = .follower;
+        node.election_reset();
+        if (node.leader == head.from) return;
+        node.leader = head.from;
+        node.emit(.{ .leader_changed = head.from });
+        assert(node.leader != .none);
     }
 
     /// Thesis §3.4 / §5.4.1. A non-member earns nothing, at any term. A member at a stale term
@@ -429,24 +415,76 @@ pub const Node = struct {
         assert(node.effects_len <= 2);
     }
 
-    /// Counts a current-term grant from `from` once, and wins the election at a quorum.
+    /// Thesis §9.6. Never adopts a term, persists, votes or resets the timer. Grants a would-be
+    /// term above ours to an up-to-date asker, unless we lead or heard from a leader within the
+    /// election timeout. A refusal carries our term. A non-member or learner earns nothing.
+    fn step_pre_vote(node: *Node, request: *const VoteRequest, member: bool) void {
+        const head = &request.header;
+        assert(head.from != node.config.id);
+        assert(node.effects_len == 0);
+        if (!member or !node_init.is_voter(node, head.from)) return;
+
+        const last = node.log.last_index();
+        const heard = node.role == .leader or
+            (node.leader != .none and node.election_elapsed < node.config.election_ticks);
+        const log_ok = election.log_up_to_date(
+            last,
+            node.log.term_at(last),
+            request.last_log_index,
+            request.last_log_term,
+        );
+        const grant = election.pre_vote_grantable(
+            head.term,
+            node.term,
+            node.role == .leader,
+            !heard,
+            log_ok,
+        );
+        const reply_term = if (grant) head.term else node.term;
+        node.emit(.{ .send = .{ .pre_vote_response = .{
+            .header = node.header_at(head.from, reply_term),
+            .granted = grant,
+        } } });
+        assert(node.effects_len == 1);
+        assert(node.role != .leader or !grant);
+    }
+
+    /// Thesis §9.6. Only a pre-candidate listens. A grant for exactly our next term is tallied;
+    /// a refusal from a higher term steps down; anything else is ignored.
+    fn step_pre_vote_response(node: *Node, reply: *const VoteResponse, member: bool) void {
+        const head = &reply.header;
+        assert(head.from != node.config.id);
+        assert(node.effects_len == 0);
+        if (!member or node.role != .pre_candidate) return;
+
+        const next = election.term_next(node.term); // A pre-candidate's term is below the max.
+        if (reply.granted) {
+            if (head.term == next) node.tally_grant(head.from);
+        } else if (head.term.order(node.term) == .gt) {
+            node.become_follower(head.term);
+        }
+        assert(node.effects_len <= node.effects.len);
+    }
+
+    /// Counts a current-term (or, for a pre-candidate, next-term) grant from `from` once, and
+    /// wins the election, or the pre-vote round and campaigns, at a quorum.
     fn tally_grant(node: *Node, from: NodeId) void {
-        assert(node.role == .candidate);
+        assert(node.role == .candidate or node.role == .pre_candidate);
         assert(node.votes_len >= 1);
         const configuration = &node.configuration;
-        const is_voter = election.contains(configuration.voters, from) or
-            election.contains(configuration.voters_outgoing, from);
-        if (!is_voter) return;
+        if (!election.is_voter(configuration.voters, configuration.voters_outgoing, from)) return;
         if (election.contains(node.votes[0..node.votes_len], from)) return;
 
         assert(node.votes_len < node.votes.len);
         node.votes[node.votes_len] = from;
         node.votes_len += 1;
-        if (node.quorum_held()) node.become_leader();
+        if (!node.quorum_held()) return;
+        if (node.role == .candidate) return node.become_leader();
+        node.campaign();
     }
 
     fn quorum_held(node: *const Node) bool {
-        assert(node.role == .candidate);
+        assert(node.role == .candidate or node.role == .pre_candidate);
         assert(node.votes_len <= node.votes.len);
         return election.quorum_reached(
             node.configuration.voters,
@@ -462,14 +500,44 @@ pub const Node = struct {
         if (node.role == .leader) return;
         if (node.election_elapsed < node.election_timeout) return;
         const configuration = &node.configuration;
-        const voter = election.contains(configuration.voters, node.config.id) or
-            election.contains(configuration.voters_outgoing, node.config.id);
+        const voter = election.is_voter(
+            configuration.voters,
+            configuration.voters_outgoing,
+            node.config.id,
+        );
         // A node already at the largest term cannot go higher: it waits (a leader or a
         // vote can only come from a peer), rather than wrapping the term.
         const term_exhausted = @intFromEnum(node.term) == std.math.maxInt(u64);
         // A learner or a node outside the configuration waits; it never campaigns.
-        if (voter and !term_exhausted) node.campaign();
+        if (!voter or term_exhausted) return;
+        // A candidate whose timer expires campaigns again; a lone voter needs no pre-vote.
+        const lone = election.quorum_reached(
+            configuration.voters,
+            configuration.voters_outgoing,
+            &.{node.config.id},
+        );
+        if (node.role == .candidate or lone) return node.campaign();
+        node.start_pre_vote();
         assert(node.effects_len <= node.effects.len);
+    }
+
+    /// Thesis §9.6: probe the cluster before disturbing it. Term, vote and the durable state
+    /// stay; the node becomes a pre-candidate with a fresh timer and a tally of itself, and
+    /// asks every other voter whether it would grant a vote at `term + 1`.
+    fn start_pre_vote(node: *Node) void {
+        assert(node.role == .follower or node.role == .pre_candidate);
+        assert(node.effects_len == 0);
+
+        const leader_before = node.leader;
+        node.role = .pre_candidate;
+        node.leader = .none;
+        node.election_reset();
+        node.votes[0] = node.config.id;
+        node.votes_len = 1;
+        node.send_vote_requests();
+        if (leader_before != .none) node.emit(.{ .leader_changed = .none });
+        assert(node.role == .pre_candidate);
+        assert(node.effects_len >= 1);
     }
 
     /// Starts an election: next term, vote for self, a fresh timer and tally, one
@@ -496,11 +564,12 @@ pub const Node = struct {
     }
 
     /// One `request_vote` to each voter of both sets other than self, none twice, no learner.
+    /// A pre-candidate sends `pre_vote`s at `term + 1`, a candidate `request_vote`s.
     fn send_vote_requests(node: *Node) void {
         const last = node.log.last_index();
         const configuration = &node.configuration;
-        assert(node.role == .candidate);
-        assert(node.vote == node.config.id);
+        assert(node.role == .candidate or node.role == .pre_candidate);
+        assert(node.role == .pre_candidate or node.vote == node.config.id);
         for (configuration.voters) |peer| {
             if (peer != node.config.id) node.send_vote_request(peer, last);
         }
@@ -513,12 +582,19 @@ pub const Node = struct {
 
     fn send_vote_request(node: *Node, to: NodeId, last: Index) void {
         assert(to != node.config.id);
-        assert(node.role == .candidate);
-        node.emit(.{ .send = .{ .request_vote = .{
-            .header = node.header_to(to),
+        const request: VoteRequest = .{
+            .header = node.header_at(to, if (node.role == .pre_candidate)
+                election.term_next(node.term)
+            else
+                node.term),
             .last_log_index = last,
             .last_log_term = node.log.term_at(last),
-        } } });
+        };
+        switch (node.role) {
+            .candidate => node.emit(.{ .send = .{ .request_vote = request } }),
+            .pre_candidate => node.emit(.{ .send = .{ .pre_vote = request } }),
+            .follower, .leader => unreachable, // Only a (pre-)candidate asks for votes.
+        }
     }
 
     fn send_vote_response(node: *Node, to: NodeId, granted: bool) void {
@@ -531,11 +607,15 @@ pub const Node = struct {
     }
 
     fn header_to(node: *const Node, to: NodeId) Header {
+        return node.header_at(to, node.term);
+    }
+
+    fn header_at(node: *const Node, to: NodeId, at: Term) Header {
         assert(to != .none);
-        assert(node.term != .zero);
+        assert(at != .zero);
         return .{
             .protocol_version = node.config.protocol_version,
-            .term = node.term,
+            .term = at,
             .from = node.config.id,
             .to = to,
         };
@@ -691,6 +771,7 @@ test {
     _ = @import("node_test.zig");
     _ = @import("node_step_test.zig");
     _ = @import("node_election_test.zig");
+    _ = @import("node_prevote_test.zig");
     _ = @import("node_invariants_test.zig");
 }
 

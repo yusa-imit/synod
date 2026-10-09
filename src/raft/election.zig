@@ -35,6 +35,30 @@ pub fn contains(ids: []const NodeId, id: NodeId) bool {
     return false;
 }
 
+/// Whether `id` votes in either set of a joint configuration.
+pub fn is_voter(voters: []const NodeId, voters_outgoing: []const NodeId, id: NodeId) bool {
+    assert(id != .none);
+    assert(voters.len + voters_outgoing.len <= 2 * types.voters_max);
+    return contains(voters, id) or contains(voters_outgoing, id);
+}
+
+/// Thesis §9.6: whether a node grants a pre-vote. The asker's would-be term must exceed ours,
+/// its log must be up to date, and we must neither lead nor have heard from a leader within
+/// the election timeout (`leader_silent` is false in that case).
+pub fn pre_vote_grantable(
+    would_be: Term,
+    term_own: Term,
+    leads: bool,
+    leader_silent: bool,
+    log_ok: bool,
+) bool {
+    assert(would_be != .zero);
+    if (would_be.order(term_own) != .gt) return false;
+    const grant = !leads and leader_silent and log_ok;
+    assert(!grant or !leads);
+    return grant;
+}
+
 /// Strictly more than half of `size`: `size / 2 + 1`. A voter set is never empty.
 pub fn majority(size: u32) u32 {
     assert(size > 0);

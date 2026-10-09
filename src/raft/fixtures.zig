@@ -284,3 +284,82 @@ pub fn expect_entries_equal(expected: []const Entry, actual: []const Entry) !voi
         try testing.expectEqualSlices(u8, want.data, got.data);
     }
 }
+
+/// A `pre_vote_response` from `from` to `to`; `term_value` is the would-be term when granted.
+pub fn pre_vote_response(from: u64, to: u64, term_value: u64, granted: bool) Message {
+    return .{ .pre_vote_response = .{
+        .header = header_of(from, to, term_value),
+        .granted = granted,
+    } };
+}
+
+/// A `pre_vote` for `term_value` claiming the sender's log ends at (`last_index`, `last_term`).
+pub fn pre_vote_at(
+    from: u64,
+    to: u64,
+    term_value: u64,
+    last_index: u64,
+    last_term: u64,
+) Message {
+    return .{ .pre_vote = .{
+        .header = header_of(from, to, term_value),
+        .last_log_index = idx(last_index),
+        .last_log_term = term(last_term),
+    } };
+}
+
+/// The pre-vote round of node 1 (ADR-007, thesis 9.6): no durable effect, exactly one
+/// `send .pre_vote` per id in `targets` and to nobody else, each at `would_be` term and
+/// stamped with the log tail; then, when `leader_cleared`, one `leader_changed(.none)` last.
+pub fn expect_pre_vote(
+    effects: Effects,
+    would_be: u64,
+    last_index: u64,
+    last_term: u64,
+    targets: []const u64,
+    leader_cleared: bool,
+) !void {
+    const extra: usize = @intFromBool(leader_cleared);
+    try testing.expectEqual(targets.len + extra, effects.items.len);
+    try testing.expectEqual(@as(u32, 0), count_effects(effects, .save_hard_state));
+    var seen = [_]u32{0} ** 8;
+    for (effects.items[0..targets.len]) |effect| {
+        const request = switch (effect) {
+            .send => |message| switch (message) {
+                .pre_vote => |payload| payload,
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        };
+        try testing.expectEqual(node_id(1), request.header.from);
+        try testing.expectEqual(term(would_be), request.header.term);
+        try testing.expectEqual(config.protocol_version, request.header.protocol_version);
+        try testing.expectEqual(idx(last_index), request.last_log_index);
+        try testing.expectEqual(term(last_term), request.last_log_term);
+        seen[@intFromEnum(request.header.to)] += 1;
+    }
+    for (targets) |target| try testing.expectEqual(@as(u32, 1), seen[target]);
+    if (leader_cleared) {
+        const last = effects.items[effects.items.len - 1];
+        try testing.expect(last == .leader_changed);
+        try testing.expectEqual(NodeId.none, last.leader_changed);
+    }
+}
+
+/// Exactly one `pre_vote_response` send, to `to`, at `term_value`, with `granted`; any other
+/// effect is a failure (a pre-vote reply is never durable).
+pub fn expect_pre_vote_reply(effects: Effects, to: u64, term_value: u64, granted: bool) !void {
+    try testing.expectEqual(@as(usize, 1), effects.items.len);
+    const reply = switch (effects.items[0]) {
+        .send => |message| switch (message) {
+            .pre_vote_response => |payload| payload,
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(node_id(to), reply.header.to);
+    try testing.expectEqual(node_id(1), reply.header.from);
+    try testing.expectEqual(term(term_value), reply.header.term);
+    try testing.expectEqual(config.protocol_version, reply.header.protocol_version);
+    try testing.expectEqual(granted, reply.granted);
+}
