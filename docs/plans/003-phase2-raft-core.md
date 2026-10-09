@@ -44,7 +44,7 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       §9.6). Why: a partitioned node rejoining must not depose a healthy leader. *Verify:*
       test where an isolated node ticks 100 timeouts and rejoins — cluster term unchanged,
       leader kept. `blocked_by: none`
-- [ ] **2C `raft/progress.zig` — per-follower tracker.** Before replication, which consumes it.
+- [x] **2C `raft/progress.zig` — per-follower tracker.** Before replication, which consumes it.
       `match`/`next`, `probe`/`replicate` states, in-flight window bounded at `init`, fast
       backtrack from a `Conflict`. Internal (not re-exported from `root.zig`), so Phase 4 can
       add a `snapshot` state without a MAJOR. *Verify:* unit tests plus a seeded test against

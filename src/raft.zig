@@ -4,7 +4,7 @@
 //! Files (see docs/PRD.md and docs/adr/0007-raft-node-contract.md):
 //!   - `raft/node.zig`: implemented (plan 003 item 2A-i): `Node`, `Config`, `Restore`, `Input`,
 //!     `Effect`, `Effects`, and the error sets, re-exported below.
-//!   - `raft/progress.zig`: planned, internal (not re-exported)
+//!   - `raft/progress.zig`: implemented (plan 003 item 2C), internal (not re-exported)
 //!   - `raft/snapshot.zig`: planned
 //!   - `raft/membership.zig`: planned
 //!   - `raft/read.zig`: planned
@@ -31,4 +31,9 @@ pub const InvariantError = node.InvariantError;
 
 test "raft: module compiles" {
     std.testing.refAllDecls(@This());
+}
+
+test {
+    // `progress` is internal (not re-exported), so its tests are pulled in here.
+    _ = @import("raft/progress_test.zig");
 }
