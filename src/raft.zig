@@ -38,4 +38,6 @@ test {
     _ = @import("raft/progress_test.zig");
     // The leader send side lives outside `node.zig` (at its line cap), so it is pulled in here.
     _ = @import("raft/node_leader_test.zig");
+    // The leader response side (accepted, rejected, stale rounds) likewise.
+    _ = @import("raft/node_leader_response_test.zig");
 }

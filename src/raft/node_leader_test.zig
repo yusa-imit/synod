@@ -12,7 +12,8 @@
 //! read through `fixtures.leader_progress`, slot order = voters without self (slot 0 is node 2).
 //! Timing contract: the election step is leader tick 0; a heartbeat falls on every
 //! `heartbeat_ticks`-th leader tick (3, 6, ...); a round unanswered for `election_ticks` (10)
-//! ticks is timed out, so the next heartbeat after it (tick 12) is the first resend.
+//! ticks is timed out, or for `heartbeat_ticks` (3) ticks while the peer is probing, so a probing
+//! peer is re-probed at every heartbeat (tick 3, 6, ...) and a replicating one at tick 12.
 
 const std = @import("std");
 const testing = std.testing;
@@ -553,12 +554,12 @@ test "leader: an unanswered round times out and the next heartbeat resends from 
     const won = try elect(&rig, 3);
 
     var buffer: [4]AppendRequest = undefined;
-    var rounds: [3]u64 = undefined;
+    var rounds: [9]u64 = undefined; // One round id per heartbeat: ticks 0, 3, ..., 24.
     rounds[0] = (try request_to(try appends(won, &buffer), 2)).round;
     const want = [_]Entry{fixtures.entry(1, 1, "")};
     for (1..25) |t| {
         const requests = try appends(try tick(&rig), &buffer);
-        if (t != 12 and t != 24) { // Probing with a live round: silent, heartbeats included.
+        if (t % config.heartbeat_ticks != 0) { // A probe round is still live: silent.
             try testing.expectEqual(@as(usize, 0), requests.len);
             continue;
         }
@@ -570,16 +571,16 @@ test "leader: an unanswered round times out and the next heartbeat resends from 
             .prev_term = 0,
             .entries = &want,
         });
-        rounds[t / 12] = (try request_to(requests, 2)).round;
+        rounds[t / config.heartbeat_ticks] = (try request_to(requests, 2)).round;
         for (try peers(&rig, 2)) |slot| {
             try testing.expectEqual(idx(1), slot.next);
             try testing.expectEqual(@as(u32, 1), slot.inflight_count);
             try testing.expectEqual(progress_module.State.probe, slot.state);
         }
     }
-    try testing.expect(rounds[0] != rounds[1]);
-    try testing.expect(rounds[1] != rounds[2]);
-    try testing.expect(rounds[0] != rounds[2]);
+    for (rounds, 0..) |round, i| { // Every resend is a fresh round: a late reply matches none.
+        for (rounds[i + 1 ..]) |other| try testing.expect(round != other);
+    }
 }
 
 // ---- stepping down, lone voter, learners ----------------------------------------------------
@@ -759,13 +760,13 @@ test "leader: election, proposals and ticks allocate nothing after init" {
 const ProbeRef = struct { last_tick: u32 = 0, resends: u32 = 0 };
 
 /// Reference for peers that never answer: a probing peer's `next` stays `match + 1 = 1`, so every
-/// send is the log prefix from index 1 (capped). A round lives `election_ticks` ticks from its
-/// send; both peers share one schedule, and a step sends to both exactly when that round is dead
-/// (and, on a tick, only on a heartbeat tick).
+/// send is the log prefix from index 1 (capped). A probe round lives `heartbeat_ticks` ticks
+/// from its send; both peers share one schedule, and a step sends to both exactly when that
+/// round is dead (and, on a tick, only on a heartbeat tick).
 fn check_probe_sends(rig: *Rig, effects: Effects, ref: *ProbeRef, now: u32, beat: bool) !void {
     var buffer: [4]AppendRequest = undefined;
     const requests = try appends(effects, &buffer);
-    const round_dead = now - ref.last_tick >= config.election_ticks;
+    const round_dead = now - ref.last_tick >= config.heartbeat_ticks;
     if (!(round_dead and beat)) return testing.expectEqual(@as(usize, 0), requests.len);
 
     const log = rig.node.entries();
@@ -813,15 +814,28 @@ test "leader model: probing peers always resend the log prefix from index 1, rou
 /// Reference next-index and window for node 2 in `.replicate`, no responses, no timeout yet.
 const Reference = struct { next: u64 = 2, inflight: u32 = 0 };
 
+/// Node 3 never answers and stays probing: it is re-probed with the log prefix from index 1 on
+/// every heartbeat tick (its round lives `heartbeat_ticks`) and is silent on proposals.
+fn check_probe_three(rig: *Rig, requests: []const AppendRequest) !void {
+    const request = try request_to(requests, 3);
+    const log = rig.node.entries();
+    try testing.expectEqual(idx(0), request.prev_log_index);
+    try testing.expectEqual(term(0), request.prev_log_term);
+    try fixtures.expect_entries_equal(log[0..@min(log.len, batch_max)], request.entries);
+}
+
 fn check_replicate_sends(
     rig: *Rig,
     requests: []const AppendRequest,
     ref: *Reference,
     expect_send: bool,
+    beat: bool,
 ) !void {
-    if (!expect_send) return testing.expectEqual(@as(usize, 0), requests.len);
-    try expect_targets(requests, &.{2}); // Node 3 is probing with a live round: silent.
-    const request = requests[0];
+    if (beat) try check_probe_three(rig, requests);
+    const want_len: usize = @as(usize, @intFromBool(expect_send)) + @intFromBool(beat);
+    try testing.expectEqual(want_len, requests.len);
+    if (!expect_send) return;
+    const request = try request_to(requests, 2);
     const log = rig.node.entries();
     const last = log.len;
     const stop = @min(last, ref.next - 1 + batch_max);
@@ -854,9 +868,9 @@ fn run_replicate_model(seed: u64) !void {
             ticks += 1;
             const requests = try appends(try tick(&rig), &buffer);
             const beat = ticks % config.heartbeat_ticks == 0;
-            try check_replicate_sends(&rig, requests, &ref, room and beat);
+            try check_replicate_sends(&rig, requests, &ref, room and beat, beat);
         } else if (propose(&rig, "x")) |effects| {
-            try check_replicate_sends(&rig, try appends(effects, &buffer), &ref, room);
+            try check_replicate_sends(&rig, try appends(effects, &buffer), &ref, room, false);
         } else |err| try testing.expectEqual(error.ProposeLogFull, err);
         try testing.expectEqual(idx(ref.next), slots[0].next);
         try testing.expectEqual(ref.inflight, slots[0].inflight_count);

@@ -47,10 +47,17 @@ All notable changes to this project are documented in this file. Format follows
   `heartbeat_ticks`-th leader tick send to each peer whose window has room, batches capped by
   `message_limits.entries_max`. Each send is a recorded round (id, `prev`, `last_sent`, send
   tick); a round unanswered for `election_ticks` ticks times out and `Progress.on_timeout`
-  reopens the window. `append_entries_response` is still ignored (item 2B-i-b).
-  `Node.check_invariants` now covers every live `Progress` and round record. `Node.init`
+  reopens the window. `Node.check_invariants` now covers every live `Progress` and round record. `Node.init`
   allocates the progress and round storage once; `peers_max + 5` effect slots cover the winning
   step. `src/raft/node_leader_test.zig` covers it, including seeded probe and pipeline models.
+- `src/raft/leader.zig` (plan 003 item 2B-i-b): the leader response side. An
+  `append_entries_response` is matched to its sender's live round record; unknown, duplicate,
+  wrong-term, timed-out or out-of-range (`prev <= matched <= last_sent`) answers are dropped.
+  `accepted` advances `Progress` and refills the window; `rejected` backs `next` up to the
+  conflict run and resends in the same step. A probing peer's lost round now expires after
+  `heartbeat_ticks` (was `election_ticks`), closing the liveness gap: a peer's round trip must
+  stay below `heartbeat_ticks`. `Progress.on_stale_rejection` frees the slot of a stale
+  rejection. `src/raft/node_leader_response_test.zig` covers it, including a seeded model.
 
 ### Changed
 

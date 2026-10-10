@@ -13,8 +13,8 @@
 //! counted against a joint-shaped quorum, and a winner appends the empty entry of its term
 //! (§5.4.2), builds one `Progress` per other voter and sends each an `append_entries`. A leader
 //! then sends on `propose` and on heartbeat ticks (`leader.zig`); a round unanswered for
-//! `election_ticks` ticks times out. `append_entries_response` is still ignored beyond the term
-//! rules (2B-i-b consumes it), and follower log matching (2B-ii) and apply (2B-iii) land later
+//! `election_ticks` ticks times out. A leader consumes `append_entries_response` in `leader.zig`
+//! (2B-i-b), and follower log matching (2B-ii) and apply (2B-iii) land later
 //! without changing a signature. The pure decisions live in `election.zig`.
 //!
 //! Invariants: `check_invariants` states them: commit within the log, applied within commit,
@@ -50,7 +50,8 @@ pub const Config = struct {
     protocol_version: u16,
     /// `t`: the election timeout is drawn from `[t, 2t)` ticks. Greater than `heartbeat_ticks`.
     election_ticks: u32,
-    /// A leader heartbeats every this many ticks; in `1..t-1`.
+    /// A leader heartbeats every this many ticks; in `1..t-1`. A probing peer's round expires
+    /// after this many ticks, so a peer's round trip must stay below it to ever be matched.
     heartbeat_ticks: u32,
     /// Per voter set, within `1..=types.voters_max`.
     voters_max: u32,
@@ -348,8 +349,13 @@ pub const Node = struct {
                 node.step_term_only(head, member);
                 node.note_leader(head);
             },
-            // Not yet handled (replication, snapshots): only the term rules apply.
-            .append_entries_response,
+            .append_entries_response => |*reply| {
+                node.step_term_only(head, member); // A higher term deposes the leader first.
+                if (node.role == .leader and head.term == node.term) {
+                    leader_module.step_response(node, reply);
+                }
+            },
+            // Not yet handled (snapshots): only the term rules apply.
             .install_snapshot,
             .install_snapshot_response,
             => node.step_term_only(head, member),

@@ -49,7 +49,7 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       backtrack from a `Conflict`. Internal (not re-exported from `root.zig`), so Phase 4 can
       add a `snapshot` state without a MAJOR. *Verify:* unit tests plus a seeded test against
       a naive reference; `match < next` asserted on both update paths. `blocked_by: none`
-- [ ] **2B-i-a Leader send side — progress init, propose, heartbeats.** Split from 2B-i (the
+- [x] **2B-i-a Leader send side — progress init, propose, heartbeats.** Split from 2B-i (the
       plan's sizing risk; `node.zig` is at its 800-line cap, so the leader logic lives in a new
       `raft/leader.zig`). On election a leader builds one `Progress` per other voter
       (`Progress.init(last_index, inflight_max)`); `propose` appends to the leader log and emits
@@ -59,7 +59,7 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       hand-stepped followers: a proposal produces one `append_entries` per peer with the right
       `prev_log_index`/entries; the window stops sends at `inflight_max`; `check_invariants()`
       covers `InvariantProgressOrder`/`InvariantInflightOverflow`. `blocked_by: none`
-- [ ] **2B-i-b Leader response side — accepted, rejected, stale rounds.** Responses are matched
+- [x] **2B-i-b Leader response side — accepted, rejected, stale rounds.** Responses are matched
       to the recorded round (unknown, duplicate, wrong-term or timed-out rounds dropped);
       `accepted` must satisfy `prev <= matched <= last_sent` before `Progress.on_accepted`;
       `rejected` calls `on_rejected` and resends from the backtracked `next`. *Verify:* a
