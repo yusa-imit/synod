@@ -341,6 +341,24 @@ test "progress: on_timeout from probe with one request in flight reopens sending
     try testing.expectEqual(idx(1), p.next);
 }
 
+test "progress: on_stale_rejection frees one slot and leaves match, next and state alone" {
+    var p = try replicating(3); // match 6, next 7
+    p.on_send(idx(8));
+    p.on_send(idx(10));
+    try testing.expect(!p.on_rejected(hint(2), idx(6))); // prev 6 <= match 6: stale.
+    p.on_stale_rejection();
+    try p.check_invariants();
+    try testing.expectEqual(@as(u32, 1), p.inflight_count);
+    try testing.expectEqual(idx(6), p.match);
+    try testing.expectEqual(idx(11), p.next);
+    try testing.expectEqual(progress_module.State.replicate, p.state);
+
+    p.on_stale_rejection();
+    try p.check_invariants();
+    try testing.expectEqual(@as(u32, 0), p.inflight_count);
+    try testing.expect(p.can_send());
+}
+
 test "progress: a repeated rejection of the same request is stale the second time" {
     var p = Progress.init(idx(10), 4);
     p.on_send(idx(10));

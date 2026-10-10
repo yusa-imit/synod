@@ -8,13 +8,19 @@
 //! in the sending peer's slot of `Rounds.records`. A slot's live records are exactly the first
 //! `Progress.inflight_count` entries of its `inflight_max` records, oldest first, so the window
 //! and the records cannot drift apart. A round times out when it has been unanswered for
-//! `election_ticks` leader ticks: the oldest live record of the slot decides, and
+//! `election_ticks` leader ticks (`heartbeat_ticks` for a probing peer, whose one lost round
+//! would otherwise gate every heartbeat): the oldest live record of the slot decides, and
 //! `Progress.on_timeout` then discards the whole window, so the next heartbeat (or proposal)
 //! resends from `match + 1` under a fresh round id and a late response to the dead round matches
-//! no record. Only 2B-i-b consumes responses, so for now `append_entries_response` messages are
-//! still ignored (term rules only) and a peer that never answers is probed once per timeout.
-//! Known liveness gap, closed by 2B-i-b: a heartbeat is gated by `Progress.can_send`, so a
-//! probing peer whose one round is lost hears nothing until that round expires.
+//! no record.
+//!
+//! Responses (2B-i-b, `step_response`): an `append_entries_response` at our term from a peer
+//! with a slot is matched to a live record of that slot by its echoed round id; anything else
+//! (a learner, a stranger, a dead or duplicate round) is dropped without a trace. `accepted` is
+//! range-checked against our own record (`prev <= matched <= last_sent`, never the peer's
+//! claim), feeds `Progress.on_accepted`, removes the record and sends the entries not yet sent.
+//! `rejected` feeds `Progress.on_rejected`: a live rejection discards the window and resends
+//! from the backtracked `next` at once; a stale one removes only its own record.
 //!
 //! Timing: the election step is leader tick 0; a heartbeat falls on every `heartbeat_ticks`-th
 //! leader tick; a proposal sends at once to each peer that can send. Round ids are issued from
@@ -143,6 +149,85 @@ pub fn send_all(node: *Node) void {
     assert(slot == node.progress_len);
 }
 
+/// Handles one `append_entries_response`. Preconditions: the node leads and the response is at
+/// our term (the caller applied the term rules). Peer data is only a key: the round id selects
+/// our own record, and every range check and index comes from that record.
+pub fn step_response(node: *Node, reply: *const AppendResponse) void {
+    assert(node.role == .leader);
+    assert(reply.header.term == node.term);
+
+    const peer = reply.header.from;
+    const slot = slot_of(node, peer) orelse return;
+    const at = live_record(node, slot, reply.round) orelse return;
+    const round = node.rounds.records[records_base(node, slot) + at];
+    const p = &node.progress[slot];
+    switch (reply.outcome) {
+        .accepted => |matched| {
+            const m = @intFromEnum(matched);
+            if (m < @intFromEnum(round.prev)) return;
+            if (m > @intFromEnum(round.last_sent)) return;
+            assert(m < std.math.maxInt(u64)); // `last_sent` came from a `u32` log count.
+            remove_record(node, slot, at);
+            // Whether match advanced is consumed by commit advancement (item 2B-iii).
+            _ = p.on_accepted(matched);
+            if (@intFromEnum(p.next) <= node.log.count) send_slot(node, slot, peer);
+        },
+        .rejected => |conflict| if (p.on_rejected(conflict, round.prev)) {
+            send_slot(node, slot, peer); // The window is gone, so every record is dead.
+        } else {
+            remove_record(node, slot, at);
+            p.on_stale_rejection();
+        },
+    }
+    assert(p.inflight_count <= p.inflight_max);
+    assert(node.effects_len <= node.progress_len);
+}
+
+/// The progress slot of `peer`, in `send_all` order, or null for a learner or a stranger.
+fn slot_of(node: *const Node, peer: NodeId) ?u32 {
+    assert(peer != node.config.id);
+    assert(node.progress_len <= node.progress.len);
+
+    var slot: u32 = 0;
+    for (node.configuration.voters) |voter| {
+        if (voter == node.config.id) continue;
+        if (voter == peer) return slot;
+        slot += 1;
+    }
+    for (node.configuration.voters_outgoing) |voter| {
+        if (!is_outgoing_peer(node, voter)) continue;
+        if (voter == peer) return slot;
+        slot += 1;
+    }
+    assert(slot == node.progress_len);
+    return null;
+}
+
+/// The position among `slot`'s live records (oldest first) of the one with id `round`.
+fn live_record(node: *const Node, slot: u32, round: u64) ?u32 {
+    assert(slot < node.progress_len);
+    const live = node.progress[slot].inflight_count;
+    assert(live <= node.config.inflight_max);
+
+    const base = records_base(node, slot);
+    for (node.rounds.records[base..][0..live], 0..) |record, at| {
+        if (record.id == round) return @intCast(at);
+    }
+    return null;
+}
+
+/// Removes live record `at` of `slot` by shifting the later ones down, keeping the order. The
+/// caller then lowers `inflight_count` (`on_accepted`, `on_stale_rejection`).
+fn remove_record(node: *Node, slot: u32, at: u32) void {
+    const live = node.progress[slot].inflight_count;
+    assert(at < live);
+    assert(live <= node.config.inflight_max);
+
+    const records = node.rounds.records[records_base(node, slot)..][0..live];
+    @memmove(records[at .. live - 1], records[at + 1 .. live]);
+    records[live - 1] = Round.empty;
+}
+
 /// One leader tick: time out the rounds that have been unanswered for `election_ticks`, then
 /// heartbeat on every `heartbeat_ticks`-th tick. Preconditions: the node leads, `effects_len`
 /// is zero.
@@ -229,7 +314,8 @@ fn send_slot(node: *Node, slot: u32, peer: NodeId) void {
     p.on_send(@enumFromInt(stop));
 }
 
-/// Times out `slot`'s window when its oldest live round is `election_ticks` old.
+/// Times out `slot`'s window when its oldest live round is old enough: `election_ticks`, or
+/// `heartbeat_ticks` while probing (a lost probe must not silence the peer for a whole timeout).
 fn round_expire(node: *Node, slot: u32) void {
     assert(slot < node.progress_len);
     const p = &node.progress[slot];
@@ -237,7 +323,11 @@ fn round_expire(node: *Node, slot: u32) void {
 
     const oldest = node.rounds.records[records_base(node, slot)];
     assert(oldest.sent_tick <= node.rounds.ticks);
-    if (node.rounds.ticks - oldest.sent_tick < node.config.election_ticks) return;
+    const age_max = switch (p.state) {
+        .probe => node.config.heartbeat_ticks,
+        .replicate => node.config.election_ticks,
+    };
+    if (node.rounds.ticks - oldest.sent_tick < age_max) return;
 
     p.on_timeout();
     assert(p.inflight_count == 0); // No live record is left: the window and records are one.
@@ -280,6 +370,7 @@ const node_module = @import("node.zig");
 const progress_module = @import("progress.zig");
 const types = @import("../types.zig");
 
+const AppendResponse = types.AppendResponse;
 const Config = node_module.Config;
 const Index = types.Index;
 const InvariantError = node_module.InvariantError;

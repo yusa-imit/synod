@@ -141,6 +141,18 @@ pub const Progress = struct {
         return true;
     }
 
+    /// A stale rejection (`on_rejected` returned false) of a request the node still holds a
+    /// live record for: that one request is answered, so frees its in-flight slot and changes
+    /// nothing else. Precondition: at least one request is in flight.
+    pub fn on_stale_rejection(p: *Progress) void {
+        assert(p.inflight_count >= 1);
+        assert(p.inflight_count <= p.inflight_max);
+
+        p.inflight_count -= 1;
+        assert(p.inflight_count < p.inflight_max);
+        assert(p.next != Index.zero);
+    }
+
     /// A probe or heartbeat round expired with no response. Without this, lost messages would
     /// keep the window full forever. Discards the window and goes back to `.probe` at
     /// `match + 1`, so `can_send()` is true again. Valid in any state, idempotent.
