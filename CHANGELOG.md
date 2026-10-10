@@ -41,6 +41,16 @@ All notable changes to this project are documented in this file. Format follows
   from a `Conflict`, `on_timeout` to reopen a window after lost messages, and
   `check_invariants` (`InvariantProgressOrder`, `InvariantInflightOverflow`).
   `src/raft/progress_test.zig` covers it, including a seeded stream against a naive reference.
+- `src/raft/leader.zig` (plan 003 item 2B-i-a): the leader send side. A winner builds one
+  probing `Progress` per other voter (both sets of a joint configuration, no learners) and sends
+  each an `append_entries` carrying the term's empty entry; `propose` and every
+  `heartbeat_ticks`-th leader tick send to each peer whose window has room, batches capped by
+  `message_limits.entries_max`. Each send is a recorded round (id, `prev`, `last_sent`, send
+  tick); a round unanswered for `election_ticks` ticks times out and `Progress.on_timeout`
+  reopens the window. `append_entries_response` is still ignored (item 2B-i-b).
+  `Node.check_invariants` now covers every live `Progress` and round record. `Node.init`
+  allocates the progress and round storage once; `peers_max + 5` effect slots cover the winning
+  step. `src/raft/node_leader_test.zig` covers it, including seeded probe and pipeline models.
 
 ### Changed
 

@@ -304,7 +304,8 @@ test "prevote: a leader long past election_ticks still refuses a pre_vote" {
     try start_pre_vote(&rig, .{ 3, 3 }, &.{ 2, 3 });
     _ = try recv(&rig, fixtures.pre_vote_response(2, 1, 4, true));
     _ = try recv(&rig, fixtures.vote_response(2, 1, 4, true));
-    try ticks_quiet(&rig, 3 * config.election_ticks);
+    // A leader heartbeats on every tick round (plan 003 item 2B-i-a): ticks are no longer quiet.
+    for (0..3 * config.election_ticks) |_| _ = try tick(&rig);
     const effects = try recv(&rig, fixtures.pre_vote_at(3, 1, 5, 4, 4));
     try fixtures.expect_pre_vote_reply(effects, 3, 4, false);
     try expect_state(&rig, .leader, 4, 1, 1);

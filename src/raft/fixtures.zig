@@ -14,6 +14,7 @@ const assert = std.debug.assert;
 const interfaces = @import("../interfaces.zig");
 const types = @import("../types.zig");
 const node_module = @import("node.zig");
+const progress_module = @import("progress.zig");
 
 const Config = node_module.Config;
 const Configuration = types.Configuration;
@@ -25,6 +26,7 @@ const Header = types.Header;
 const Index = types.Index;
 const Message = types.Message;
 const Node = node_module.Node;
+const Progress = progress_module.Progress;
 const NodeId = types.NodeId;
 const Restore = node_module.Restore;
 const Rng = interfaces.Rng;
@@ -362,4 +364,12 @@ pub fn expect_pre_vote_reply(effects: Effects, to: u64, term_value: u64, granted
     try testing.expectEqual(term(term_value), reply.header.term);
     try testing.expectEqual(config.protocol_version, reply.header.protocol_version);
     try testing.expectEqual(granted, reply.granted);
+}
+
+/// The leader's live per-peer trackers, slot order = `configuration.voters` without self (so
+/// slot 0 is node 2 in the three-voter rig). Test-only window onto node-owned state: the leader
+/// side holds them in `Node.progress` (capacity fixed at `init`) with `Node.progress_len` live,
+/// zero when the node does not lead.
+pub fn leader_progress(node: *Node) []Progress {
+    return node.progress[0..node.progress_len];
 }

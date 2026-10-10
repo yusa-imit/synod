@@ -1,6 +1,7 @@
 //! synod.raft.node_init — the free functions `Node.init` is built from: `Config` assertions,
 //! the `Restore` data check, the sizes of the node's preallocated arrays, the election-timeout
-//! draw, and the membership copy. Split from `node.zig` to keep both files readable.
+//! draw, the membership copy, membership tests, and the entry-byte-arena `log_append`. Split
+//! from `node.zig` to keep both files readable.
 //!
 //! Invariants: nothing here allocates or keeps state; every size is a pure function of `Config`
 //! (a caller bug in `Config` is asserted), and `restore_validate` returns a typed error for bad
@@ -10,6 +11,8 @@
 //! one `memcpy` of at most `2 * voters_max + learners_max` ids.
 
 /// Effect slots beyond one per peer: truncate, append, save_hard_state, apply, leader_changed.
+/// The winning step needs `save_hard_state`, `append`, one `send` per peer and `leader_changed`:
+/// `peers_max + 3`.
 pub const effects_fixed_count: u32 = 5;
 
 /// Asserts the `Config` contract of ADR-007: a caller's bug, never a returned error.
@@ -30,7 +33,24 @@ pub fn assert_config(config: *const Config) void {
 pub fn effects_capacity(config: *const Config) u32 {
     const peers_max = 2 * config.voters_max + config.learners_max - 1;
     assert(peers_max >= 1);
-    return peers_max + effects_fixed_count;
+    const result = peers_max + effects_fixed_count;
+    assert(result >= peers_max + 3); // The winning step: hard state, append, sends, leader_changed.
+    return result;
+}
+
+/// `Progress` slots: one per distinct voter of a joint configuration, `2 * voters_max`.
+pub fn progress_capacity(config: *const Config) u32 {
+    const result = 2 * config.voters_max;
+    assert(result >= 2);
+    return result;
+}
+
+/// Round records: `inflight_max` per progress slot (the window is the bound on live rounds).
+pub fn rounds_capacity(config: *const Config) usize {
+    const result = @as(usize, progress_capacity(config)) * config.inflight_max;
+    assert(config.inflight_max > 0);
+    assert(result >= progress_capacity(config));
+    return result;
 }
 
 /// Distinct voters over both sets of a joint configuration.
@@ -107,6 +127,56 @@ pub fn is_voter(node: *const Node, id: NodeId) bool {
     return election.is_voter(sets.voters, sets.voters_outgoing, id);
 }
 
+/// Whether `id` is in any set of the node's configuration, learners included.
+pub fn is_member(node: *const Node, id: NodeId) bool {
+    assert(id != .none);
+    assert(id != node.config.id);
+    const sets = &node.configuration;
+    for (sets.voters) |voter| if (voter == id) return true;
+    for (sets.voters_outgoing) |voter| if (voter == id) return true;
+    for (sets.learners) |learner| if (learner == id) return true;
+    return false;
+}
+
+/// Copies the restored log into the node's (empty) log and entry-byte arena. Returns
+/// `error.RestoreLogFull` when `Config` leaves too few slots or bytes for it.
+pub fn restore_entries(node: *Node, restore: *const Restore) error{RestoreLogFull}!void {
+    assert(node.log.count == 0);
+    assert(node.bytes_used == 0);
+    for (restore.entries) |entry| {
+        log_append(node, entry.term, entry.kind, entry.data) catch |err| switch (err) {
+            error.LogFull => return error.RestoreLogFull,
+        };
+    }
+    assert(node.log.count == restore.entries.len);
+}
+
+/// Appends an entry at `last_index + 1`, copying `data` into the entry-byte arena. Returns
+/// `error.LogFull` (node unchanged) when no slot or too few bytes remain.
+pub fn log_append(
+    node: *Node,
+    entry_term: Term,
+    kind: EntryKind,
+    data: []const u8,
+) error{LogFull}!void {
+    assert(entry_term != .zero);
+    assert(node.bytes_used <= node.bytes.len);
+
+    const used: usize = node.bytes_used;
+    if (data.len > node.bytes.len - used) return error.LogFull;
+    const stored = node.bytes[used..][0..data.len];
+    @memcpy(stored, data);
+    try node.log.append(.{
+        .index = node.log.last_index().next(),
+        .term = entry_term,
+        .kind = kind,
+        .data = stored,
+    });
+    node.bytes_used += @intCast(data.len);
+    assert(node.bytes_used <= node.bytes.len);
+    assert(node.log.entries[node.log.count - 1].data.ptr == stored.ptr);
+}
+
 pub fn check_invariants_indices(node: *const Node) InvariantError!void {
     const last_index = node.log.last_index();
     if (node.commit_index.order(last_index) == .gt) return error.InvariantCommitBeyondLog;
@@ -155,6 +225,7 @@ const types = @import("../types.zig");
 
 const Config = node_module.Config;
 const Configuration = types.Configuration;
+const EntryKind = types.EntryKind;
 const InitError = node_module.InitError;
 const InvariantError = node_module.InvariantError;
 const Node = node_module.Node;
