@@ -2,28 +2,32 @@
 //! `Effects`, `Role`, `Status`, the error sets, and `Node` (`init`, `deinit`, `step`, `status`,
 //! `entries`, `check_invariants`).
 //!
-//! Scope (plan 003 items 2A-i to 2A-iii): skeleton, election, PreVote. A node restores from
-//! `Restore`, validates and routes every received message, applies the term rules (a higher
-//! term from a known member makes a follower and persists once; a stale term is dropped),
-//! counts ticks, and rejects proposals unless it leads. An election timeout first runs a
-//! PreVote round (§9.6): a pre-candidate keeps its term and vote, sends `pre_vote` at `term + 1`
-//! and campaigns on a quorum of grants; a voter grants without adopting a term, persisting or
-//! resetting its timer. A lone voter and an expired candidate campaign directly. `request_vote`
-//! is granted once per term to an up-to-date candidate; granted responses are counted against a
-//! joint-shaped quorum, and a winner appends the empty entry of its term (§5.4.2). Replication
-//! (2B) and apply (2C) land later and extend `step_message`, `step_tick` and `step_propose`
-//! without changing a signature. The pure decisions (up-to-date, quorum) live in `election.zig`.
+//! Scope (plan 003 items 2A-i to 2A-iii, 2B-i-a): skeleton, election, PreVote, the leader send
+//! side. A node restores from `Restore`, validates and routes every received message, applies
+//! the term rules (a higher term from a known member makes a follower and persists once; a stale
+//! term is dropped), counts ticks, and rejects proposals unless it leads. An election timeout
+//! first runs a PreVote round (§9.6): a pre-candidate keeps its term and vote, sends `pre_vote`
+//! at `term + 1` and campaigns on a quorum of grants; a voter grants without adopting a term,
+//! persisting or resetting its timer. A lone voter and an expired candidate campaign directly.
+//! `request_vote` is granted once per term to an up-to-date candidate; granted responses are
+//! counted against a joint-shaped quorum, and a winner appends the empty entry of its term
+//! (§5.4.2), builds one `Progress` per other voter and sends each an `append_entries`. A leader
+//! then sends on `propose` and on heartbeat ticks (`leader.zig`); a round unanswered for
+//! `election_ticks` ticks times out. `append_entries_response` is still ignored beyond the term
+//! rules (2B-i-b consumes it), and follower log matching (2B-ii) and apply (2B-iii) land later
+//! without changing a signature. The pure decisions live in `election.zig`.
 //!
 //! Invariants: `check_invariants` states them: commit within the log, applied within commit,
 //! the term at least the last entry's term, no vote in term zero, `role == .leader` exactly
 //! when `leader == config.id`, the election timeout in `[t, 2t)`, entry bytes packed in index
-//! order. A `StepError` returns before any mutation and with no `Effects`.
+//! order, and a leader's `Progress` and round records (`leader.zig`). A
+//! `StepError` returns before any mutation and with no `Effects`.
 //!
 //! Allocation: `init` allocates everything the node will ever use from `gpa` (log slots, the
-//! `log_bytes_max` entry-byte arena, the member list, the `2 * voters_max` vote tally, and
-//! `peers_max + 5` effect slots). `step`
-//! and every other method take no allocator and never allocate (Tiger Style §1.9). `deinit`
-//! takes the same `gpa`; the node never stores it.
+//! `log_bytes_max` entry-byte arena, the member list, the `2 * voters_max` vote tally,
+//! `peers_max + 5` effect slots, and the leader's `2 * voters_max` `Progress` slots with
+//! `inflight_max` round records each). `step` and every other method take no allocator and never
+//! allocate (Tiger Style §1.9). `deinit` takes the same `gpa`; the node never stores it.
 //!
 //! Ownership: `init` copies all of `Restore` (hard state, entry bytes, configuration); the node
 //! owns those copies. `Input.message` and `Input.propose` bytes are borrowed until `step`
@@ -34,8 +38,9 @@
 //!
 //! Cost sketch: no I/O, no syscalls. `step` touches the term, vote and role words plus at most
 //! the member list (at most `2 * voters_max + learners_max` ids) to find the sender, and the
-//! vote tally (at most `2 * voters_max` ids) when counting a grant; effects
-//! are written into one preallocated array, so the working set stays within a few cache lines.
+//! vote tally (at most `2 * voters_max` ids) when counting a grant; a leader's send touches one
+//! `Progress` and one `Round` per peer (32 bytes each). Effects are written into one
+//! preallocated array, so the working set stays within a few cache lines.
 
 /// Node configuration. Spelled out at every call site; no defaults (ADR-007).
 pub const Config = struct {
@@ -169,6 +174,11 @@ pub const Node = struct {
     /// Effect slots, `peers_max + 5` long; `effects[0..effects_len]` is the last step's output.
     effects: []Effect,
     effects_len: u32,
+    /// Leader only: one `Progress` per other voter in `progress[0..progress_len]` (`leader.zig`).
+    progress: []Progress,
+    progress_len: u32,
+    /// Leader only: the records of the rounds in flight, and the round and tick counters.
+    rounds: leader_module.Rounds,
 
     /// Initializes `node` in place from `config`, `restore` and the injected `rng`, copying all
     /// of `restore`. The node starts a follower with `applied_index == .zero`.
@@ -202,6 +212,9 @@ pub const Node = struct {
         const effects = try gpa.alloc(Effect, node_init.effects_capacity(&config));
         errdefer gpa.free(effects);
 
+        const leader_storage = try leader_module.Storage.init(gpa, &config);
+        errdefer leader_storage.deinit(gpa);
+
         @memset(log.entries, .{ .index = .zero, .term = .zero, .kind = .normal, .data = "" });
         @memset(bytes, 0);
         @memset(members, .none);
@@ -228,12 +241,11 @@ pub const Node = struct {
             .votes_len = 0,
             .effects = effects,
             .effects_len = 0,
+            .progress = leader_storage.progress,
+            .progress_len = 0,
+            .rounds = leader_storage.rounds,
         };
-        for (restore.entries) |entry| {
-            node.log_append(entry.term, entry.kind, entry.data) catch |err| switch (err) {
-                error.LogFull => return error.RestoreLogFull,
-            };
-        }
+        try node_init.restore_entries(node, restore);
 
         assert(node.role == .follower);
         assert(node.applied_index == .zero);
@@ -246,12 +258,16 @@ pub const Node = struct {
         assert(node.effects.len > 0);
         assert(node.members.len > 0);
 
+        gpa.free(node.rounds.records);
+        gpa.free(node.progress);
         gpa.free(node.effects);
         gpa.free(node.votes);
         gpa.free(node.members);
         gpa.free(node.bytes);
         node.log.deinit(gpa);
 
+        node.progress = &.{};
+        node.rounds.records = &.{};
         node.effects = &.{};
         node.votes = &.{};
         node.members = &.{};
@@ -299,8 +315,8 @@ pub const Node = struct {
     }
 
     /// Defense-in-depth for the simulator: returns the first violated invariant of a corrupted
-    /// node. A node built by `init` and driven by `step` never fails it. The progress and
-    /// inflight invariants need a leader's per-peer state (items 2B and later) and pass here.
+    /// node. A node built by `init` and driven by `step` never fails it. A leader's per-peer
+    /// `Progress` and round records are checked too (`leader.zig`).
     pub fn check_invariants(node: *const Node) InvariantError!void {
         assert(node.log.count <= node.log.entries.len);
         assert(node.effects_len <= node.effects.len);
@@ -309,6 +325,7 @@ pub const Node = struct {
         try node_init.check_invariants_indices(node);
         try node_init.check_invariants_election(node);
         try node_init.check_invariants_bytes(node);
+        try leader_module.check_invariants(node);
     }
 
     fn step_message(node: *Node, message: *const Message) StepError!void {
@@ -319,7 +336,7 @@ pub const Node = struct {
         assert(head.term != .zero);
 
         node.effects_len = 0;
-        const member = node.is_member(head.from);
+        const member = node_init.is_member(node, head.from);
         switch (message.*) {
             .request_vote => |*request| node.step_request_vote(request, member),
             .request_vote_response => |*reply| node.step_vote_response(reply, member),
@@ -349,14 +366,14 @@ pub const Node = struct {
             .lt, .eq => {},
             .gt => if (member) node.become_follower(head.term),
         }
-        assert(node.effects_len <= 2);
+        assert(node.effects_len <= node.effects.len);
     }
 
     /// A member's `append_entries` at our term names it the leader: a candidate (or pre-candidate)
     /// yields, the timer restarts, and `leader_changed` is emitted when the leader is news.
     fn note_leader(node: *Node, head: *const Header) void {
         assert(head.from != node.config.id);
-        assert(node.effects_len <= 2);
+        assert(node.effects_len <= node.effects.len);
         // One leader per term: only a voter may claim it, and the first claim stands.
         if (!node_init.is_voter(node, head.from) or head.term != node.term) return;
         if (node.role == .leader or (node.leader != .none and node.leader != head.from)) return;
@@ -412,7 +429,7 @@ pub const Node = struct {
             .gt => node.become_follower(head.term),
             .eq => if (node.role == .candidate and reply.granted) node.tally_grant(head.from),
         }
-        assert(node.effects_len <= 2);
+        assert(node.effects_len <= node.effects.len);
     }
 
     /// Thesis §9.6. Never adopts a term, persists, votes or resets the timer. Grants a would-be
@@ -497,7 +514,7 @@ pub const Node = struct {
         node.effects_len = 0;
         node.election_elapsed +|= 1;
         assert(node.election_timeout >= node.config.election_ticks);
-        if (node.role == .leader) return;
+        if (node.role == .leader) return leader_module.tick(node);
         if (node.election_elapsed < node.election_timeout) return;
         const configuration = &node.configuration;
         const voter = election.is_voter(
@@ -606,7 +623,8 @@ pub const Node = struct {
         } } });
     }
 
-    fn header_to(node: *const Node, to: NodeId) Header {
+    /// A header to `to` at the current term; used by `leader.zig`.
+    pub fn header_to(node: *const Node, to: NodeId) Header {
         return node.header_at(to, node.term);
     }
 
@@ -624,7 +642,7 @@ pub const Node = struct {
     /// Wins the election: leader at the current term, an empty `.normal` entry appended (§5.4.2),
     /// then `leader_changed(self)`. If the log has no free slot the entry is skipped and the node
     /// still leads: it cannot commit earlier terms until a proposal fits, and the driver sees
-    /// the missing `append` as it sees any full log. Replication (2B) revisits this.
+    /// the missing `append` as it sees any full log. The leader then starts its send side.
     fn become_leader(node: *Node) void {
         assert(node.role == .candidate);
         assert(node.vote == node.config.id);
@@ -632,13 +650,14 @@ pub const Node = struct {
         node.role = .leader;
         node.leader = node.config.id;
         const count_before = node.log.count;
-        node.log_append(node.term, .normal, "") catch |err| switch (err) {
+        node_init.log_append(node, node.term, .normal, "") catch |err| switch (err) {
             error.LogFull => {},
         };
         const count_after = node.log.count;
         if (count_after > count_before) {
             node.emit(.{ .append = node.log.entries[count_before..count_after] });
         }
+        leader_module.start(node, count_before);
         node.emit(.{ .leader_changed = node.config.id });
 
         assert(node.role == .leader);
@@ -650,13 +669,14 @@ pub const Node = struct {
         assert(node.leader == node.config.id);
         if (data.len > node.config.message_limits.entry_bytes_max) return error.ProposeTooLarge;
 
-        node.log_append(node.term, .normal, data) catch |err| switch (err) {
+        node_init.log_append(node, node.term, .normal, data) catch |err| switch (err) {
             error.LogFull => return error.ProposeLogFull,
         };
         node.effects_len = 0;
         const last = node.log.count;
         node.emit(.{ .append = node.log.entries[last - 1 .. last] });
-        assert(node.effects_len == 1);
+        leader_module.send_all(node);
+        assert(node.effects_len >= 1);
         assert(node.log.last_index().order(node.commit_index) == .gt);
     }
 
@@ -687,6 +707,7 @@ pub const Node = struct {
         node.vote = .none;
         node.role = .follower;
         node.leader = .none;
+        leader_module.reset(node);
         node.election_reset();
 
         assert(node.role == .follower);
@@ -717,9 +738,9 @@ pub const Node = struct {
         node.hard_state_saved = hard_state;
     }
 
-    /// Appends one effect. Preconditions: a free slot, and `effect.phase()` not below the
-    /// phase of the previous effect (the ADR-007 ordering).
-    fn emit(node: *Node, effect: Effect) void {
+    /// Appends one effect (also used by `leader.zig`). Preconditions: a free slot, and
+    /// `effect.phase()` not below the phase of the previous effect (the ADR-007 ordering).
+    pub fn emit(node: *Node, effect: Effect) void {
         assert(node.effects_len < node.effects.len);
         if (node.effects_len > 0) {
             const previous = node.effects[node.effects_len - 1].phase();
@@ -728,42 +749,6 @@ pub const Node = struct {
         node.effects[node.effects_len] = effect;
         node.effects_len += 1;
         assert(node.effects_len <= node.effects.len);
-    }
-
-    /// Appends an entry at `last_index + 1`, copying `data` into the entry-byte arena. Returns
-    /// `error.LogFull` (node unchanged) when no slot or too few bytes remain.
-    fn log_append(
-        node: *Node,
-        entry_term: Term,
-        kind: EntryKind,
-        data: []const u8,
-    ) error{LogFull}!void {
-        assert(entry_term != .zero);
-        assert(node.bytes_used <= node.bytes.len);
-
-        const used: usize = node.bytes_used;
-        if (data.len > node.bytes.len - used) return error.LogFull;
-        const stored = node.bytes[used..][0..data.len];
-        @memcpy(stored, data);
-        try node.log.append(.{
-            .index = node.log.last_index().next(),
-            .term = entry_term,
-            .kind = kind,
-            .data = stored,
-        });
-        node.bytes_used += @intCast(data.len);
-        assert(node.bytes_used <= node.bytes.len);
-        assert(node.log.entries[node.log.count - 1].data.ptr == stored.ptr);
-    }
-
-    fn is_member(node: *const Node, id: NodeId) bool {
-        assert(id != .none);
-        assert(id != node.config.id);
-        const configuration = &node.configuration;
-        for (configuration.voters) |voter| if (voter == id) return true;
-        for (configuration.voters_outgoing) |voter| if (voter == id) return true;
-        for (configuration.learners) |learner| if (learner == id) return true;
-        return false;
     }
 };
 
@@ -780,6 +765,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const election = @import("election.zig");
 const interfaces = @import("../interfaces.zig");
+const leader_module = @import("leader.zig");
 const log_module = @import("../log.zig");
 const node_init = @import("node_init.zig");
 const types = @import("../types.zig");
@@ -794,6 +780,7 @@ const Index = types.Index;
 const Message = types.Message;
 const MessageError = types.MessageError;
 const NodeId = types.NodeId;
+const Progress = @import("progress.zig").Progress;
 const Rng = interfaces.Rng;
 const Term = types.Term;
 const VoteRequest = types.VoteRequest;

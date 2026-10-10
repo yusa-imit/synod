@@ -36,4 +36,6 @@ test "raft: module compiles" {
 test {
     // `progress` is internal (not re-exported), so its tests are pulled in here.
     _ = @import("raft/progress_test.zig");
+    // The leader send side lives outside `node.zig` (at its line cap), so it is pulled in here.
+    _ = @import("raft/node_leader_test.zig");
 }
