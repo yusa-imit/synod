@@ -157,6 +157,15 @@ fn expect_none(effects: Effects) !void {
     try testing.expectEqual(@as(usize, 0), effects.items.len);
 }
 
+/// No `append_entries` or any other send or log write: a response may still persist and apply the
+/// commit it completes (`save_hard_state`, `apply`), which `node_commit_test.zig` pins down.
+fn expect_no_sends(effects: Effects) !void {
+    for (effects.items) |effect| switch (effect) {
+        .save_hard_state, .apply => {},
+        else => return error.TestUnexpectedResult,
+    };
+}
+
 fn expect_batch(request: AppendRequest, prev: u64, prev_term: u64, want: []const Entry) !void {
     try testing.expectEqual(idx(prev), request.prev_log_index);
     try testing.expectEqual(term(prev_term), request.prev_log_term);
@@ -256,7 +265,7 @@ test "response: accepting the election round raises match, starts replicating, s
     const won = try elect(&rig);
     const r2 = try round_to(won, 2);
 
-    try expect_none(try recv(&rig, accepted(2, r2, 1, 1)));
+    try expect_no_sends(try recv(&rig, accepted(2, r2, 1, 1)));
     const slot = peers(&rig)[0];
     try testing.expectEqual(idx(1), slot.match);
     try testing.expectEqual(idx(2), slot.next);
@@ -318,12 +327,12 @@ fn answer_in_order(first_is_a: bool) !void {
     const late = if (first_is_a) p.b2 else p.a2;
     const early_matched: u64 = if (first_is_a) 2 else 3;
     const late_matched: u64 = if (first_is_a) 3 else 2;
-    try expect_none(try recv(&rig, accepted(2, early, 1, early_matched)));
+    try expect_no_sends(try recv(&rig, accepted(2, early, 1, early_matched)));
     try testing.expectEqual(@as(u32, 1), peers(&rig)[0].inflight_count);
     try testing.expectEqual(late, records[0].id); // The survivor moved to the front.
     try testing.expectEqual(idx(early_matched), peers(&rig)[0].match);
 
-    try expect_none(try recv(&rig, accepted(2, late, 1, late_matched)));
+    try expect_no_sends(try recv(&rig, accepted(2, late, 1, late_matched)));
     try testing.expectEqual(@as(u32, 0), peers(&rig)[0].inflight_count);
     try testing.expectEqual(idx(3), peers(&rig)[0].match); // Never lowered by the older answer.
     try testing.expectEqual(@as(u32, 2), peers(&rig)[1].inflight_count); // Node 3 untouched.
@@ -341,7 +350,7 @@ test "response: a duplicate of an answered round is dropped and does not free a 
     const p = try pipeline(&rig);
     defer rig.deinit(testing.allocator);
 
-    try expect_none(try recv(&rig, accepted(2, p.a2, 1, 2)));
+    try expect_no_sends(try recv(&rig, accepted(2, p.a2, 1, 2)));
     try testing.expectEqual(@as(u32, 1), peers(&rig)[0].inflight_count);
     try expect_dropped(&rig, accepted(2, p.a2, 1, 2));
     try expect_dropped(&rig, accepted(2, p.a2, 1, 3)); // Even with a different claim.
@@ -373,7 +382,7 @@ test "response: matched outside the recorded prev..last_sent is dropped and the 
     try expect_dropped(&rig, accepted(2, round, 1, 0)); // Below prev.
     try expect_dropped(&rig, accepted(2, round, 1, 3)); // Above last_sent.
     try expect_dropped(&rig, accepted(2, round, 1, std.math.maxInt(u64)));
-    try expect_none(try recv(&rig, accepted(2, round, 1, 2))); // The record was untouched.
+    try expect_no_sends(try recv(&rig, accepted(2, round, 1, 2))); // The record was untouched.
     try testing.expectEqual(idx(2), peers(&rig)[0].match);
     try testing.expectEqual(@as(u32, 0), peers(&rig)[0].inflight_count);
 
@@ -407,7 +416,7 @@ test "response: a rejection backs next up to the conflict run and resends in one
     try testing.expectEqual(@as(u32, 1), peers(&rig)[1].inflight_count); // Node 3 untouched.
 
     try expect_dropped(&rig, accepted(2, r2, 4, 3)); // The rejected round is gone for good.
-    try expect_none(try recv(&rig, accepted(2, request.round, 4, 4)));
+    try expect_no_sends(try recv(&rig, accepted(2, request.round, 4, 4)));
     try testing.expectEqual(idx(4), peers(&rig)[0].match);
     try testing.expectEqual(progress_module.State.replicate, peers(&rig)[0].state);
 }
@@ -452,7 +461,7 @@ test "response: a stale rejection removes only its record, a live one discards t
     try testing.expectEqual(request.round, records[0].id);
 
     try expect_dropped(&rig, accepted(2, third, 1, 4)); // Round c died with its window.
-    try expect_none(try recv(&rig, accepted(2, request.round, 1, 4)));
+    try expect_no_sends(try recv(&rig, accepted(2, request.round, 1, 4)));
     try testing.expectEqual(idx(4), peers(&rig)[0].match);
 }
 
@@ -618,7 +627,7 @@ test "response: an answer to a timed-out round never touches the new window" {
     try expect_dropped(&rig, accepted(2, old, 1, 1));
     try expect_dropped(&rig, rejected(2, old, 1, 0, 0));
     try testing.expectEqual(@as(u32, 1), peers(&rig)[0].inflight_count);
-    try expect_none(try recv(&rig, accepted(2, fresh_round, 1, 1)));
+    try expect_no_sends(try recv(&rig, accepted(2, fresh_round, 1, 1)));
     try testing.expectEqual(idx(1), peers(&rig)[0].match);
     try testing.expectEqual(progress_module.State.replicate, peers(&rig)[0].state);
 }
@@ -720,6 +729,8 @@ test "response: a follower or candidate drops an append answer without effect" {
     var rig: Rig = undefined;
     try rig.init_fixed(testing.allocator, config, &logged, low);
     defer rig.deinit(testing.allocator);
+    // The first step replays the restored commit (`apply`); a quiet tick consumes it.
+    try testing.expectEqual(@as(u32, 1), fixtures.count_effects(try tick(&rig), .apply));
     const before = snap(&rig);
     try expect_none(try recv(&rig, accepted(2, 1, 3, 3))); // Follower at term 3.
     try expect_unchanged(&rig, before);

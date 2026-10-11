@@ -70,7 +70,7 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       append, reply `accepted(match)` or `rejected(Conflict)`. *Verify:* Raft paper Figure 7
       follower logs (a)–(f) each converge to the leader's log; `log.validate()` after each step.
       `blocked_by: none`
-- [ ] **2B-iii Commit advancement and apply.** Leader commits the highest index a quorum
+- [x] **2B-iii Commit advancement and apply.** Leader commits the highest index a quorum
       matches, only for a current-term entry (§5.4.2); followers take `min(leader_commit, last
       new index)`; emit `apply` in order, once. Why its own item: Figure 8 is the classic bug.
       *Verify:* a Figure 8 test (old-term entry never committed by counting); commit never

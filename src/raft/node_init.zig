@@ -10,10 +10,13 @@
 //! Cost sketch: `restore_validate` is one pass over the restored entries; the rest is O(1) or
 //! one `memcpy` of at most `2 * voters_max + learners_max` ids.
 
-/// Effect slots beyond one per peer: truncate, append, save_hard_state, apply, leader_changed.
-/// The winning step needs `save_hard_state`, `append`, one `send` per peer and `leader_changed`:
-/// `peers_max + 3`.
-pub const effects_fixed_count: u32 = 5;
+/// Effect slots beyond one per peer. The worst step is a follower that adopts a higher term and
+/// accepts a conflicting batch: `save_hard_state`, `truncate`, `append`, `save_hard_state`
+/// (commit), the reply `send`, `apply`, `leader_changed(none)`, `leader_changed(id)` = 8 with
+/// one send, so `peers_max + 7` (`peers_max >= 1`). The leader's worst steps are smaller: the
+/// win of a lone voter (`save`, `append`, `save`, `apply`, `leader_changed`) and a response
+/// (`save`, one send, `apply`).
+pub const effects_fixed_count: u32 = 7;
 
 /// Asserts the `Config` contract of ADR-007: a caller's bug, never a returned error.
 pub fn assert_config(config: *const Config) void {
@@ -35,6 +38,7 @@ pub fn effects_capacity(config: *const Config) u32 {
     assert(peers_max >= 1);
     const result = peers_max + effects_fixed_count;
     assert(result >= peers_max + 3); // The winning step: hard state, append, sends, leader_changed.
+    assert(result >= 8); // The follower's worst step, see `effects_fixed_count`.
     return result;
 }
 
