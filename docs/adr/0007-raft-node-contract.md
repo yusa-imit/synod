@@ -100,8 +100,11 @@ pub const Driver = struct { // src/driver.zig, the std.Io boundary (ADR-002)
   Proposals, received `AppendRequest.entries`, and `Restore.entries` are copied in; `log.Log`
   borrows from it; `truncate` reclaims the suffix. `LogStore.append` copies, `Transport.send`
   encodes, `StateMachine.apply` borrows for the call. `ProposeTooLarge` is data above
-  `entry_bytes_max`; `ProposeLogFull`, no slot or byte left. A full follower stores the prefix
-  that fits and acks its true match.
+  `entry_bytes_max`; `ProposeLogFull`, no slot or byte left. A full follower drops an
+  overflowing `AppendRequest` whole (no truncate, no append, no reply; amended by plan 003
+  item 2B-ii): storing a prefix would make the leader resend the tail on every ack and could
+  cut a conflicting suffix for a replacement stored only in part. The round timeout paces the
+  retry.
 - **`init` takes data, not a `LogStore`.** `Conf*` for a configuration over the `Config` caps;
   `RestoreInconsistent` for entries not contiguous from 1, a term above `hard_state.term`, or
   `commit_index` past the log; `RestoreLogFull` past capacity. A restarted node is a follower

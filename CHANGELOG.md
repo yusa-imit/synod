@@ -58,6 +58,17 @@ All notable changes to this project are documented in this file. Format follows
   `heartbeat_ticks` (was `election_ticks`), closing the liveness gap: a peer's round trip must
   stay below `heartbeat_ticks`. `Progress.on_stale_rejection` frees the slot of a stale
   rejection. `src/raft/node_leader_response_test.zig` covers it, including a seeded model.
+- `src/raft/follower.zig` (plan 003 item 2B-ii): follower log matching. A voter's
+  `append_entries` at our term names the leader (a candidate yields, the timer restarts); a
+  mismatch at `prev_log_index` is refused with the fast-backtrack `Conflict`, a match skips the
+  entries already held, truncates at the first conflicting one and appends the rest, copying the
+  bytes into the node's arena, then replies `accepted(prev + entries.len)` after the persist
+  effects. A stale term is refused with `rejected{0, 0}` at our term; non-members, learners, a
+  leader and a second claimant of a term are ignored. A conflict at or below `commit_index` and
+  an append that overflows the log slots or arena are dropped whole (no mutation, no reply; the
+  overflow rule replaces ADR-007's "store the prefix", which the ADR now amends).
+  `leader_changed` is now emitted after the persist and send effects. `leader_commit` is
+  ignored until 2B-iii. `src/raft/node_follower_test.zig` covers it, including a seeded model.
 
 ### Changed
 

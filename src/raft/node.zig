@@ -2,20 +2,21 @@
 //! `Effects`, `Role`, `Status`, the error sets, and `Node` (`init`, `deinit`, `step`, `status`,
 //! `entries`, `check_invariants`).
 //!
-//! Scope (plan 003 items 2A-i to 2A-iii, 2B-i-a): skeleton, election, PreVote, the leader send
-//! side. A node restores from `Restore`, validates and routes every received message, applies
-//! the term rules (a higher term from a known member makes a follower and persists once; a stale
-//! term is dropped), counts ticks, and rejects proposals unless it leads. An election timeout
-//! first runs a PreVote round (§9.6): a pre-candidate keeps its term and vote, sends `pre_vote`
-//! at `term + 1` and campaigns on a quorum of grants; a voter grants without adopting a term,
-//! persisting or resetting its timer. A lone voter and an expired candidate campaign directly.
-//! `request_vote` is granted once per term to an up-to-date candidate; granted responses are
-//! counted against a joint-shaped quorum, and a winner appends the empty entry of its term
-//! (§5.4.2), builds one `Progress` per other voter and sends each an `append_entries`. A leader
-//! then sends on `propose` and on heartbeat ticks (`leader.zig`); a round unanswered for
-//! `election_ticks` ticks times out. A leader consumes `append_entries_response` in `leader.zig`
-//! (2B-i-b), and follower log matching (2B-ii) and apply (2B-iii) land later
-//! without changing a signature. The pure decisions live in `election.zig`.
+//! Scope (plan 003 items 2A-i to 2A-iii, 2B-i, 2B-ii): skeleton, election, PreVote, the leader send
+//! and response sides, follower log matching. A node restores from `Restore`, validates and routes
+//! every received message, applies the term rules (a higher term from a known member makes a
+//! follower and persists once; a stale term is dropped), counts ticks, and rejects proposals unless
+//! it leads. An election timeout first runs a PreVote round (§9.6): a pre-candidate keeps its term
+//! and vote, sends `pre_vote` at `term + 1` and campaigns on a quorum of grants; a voter grants
+//! without adopting a term, persisting or resetting its timer. A lone voter and an expired
+//! candidate campaign directly. `request_vote` is granted once per term to an up-to-date candidate;
+//! granted responses are counted against a joint-shaped quorum, and a winner appends the empty
+//! entry of its term (§5.4.2), builds one `Progress` per other voter and sends each an
+//! `append_entries`. A leader then sends on `propose` and on heartbeat ticks (`leader.zig`); a
+//! round unanswered for `election_ticks` ticks times out. A leader consumes
+//! `append_entries_response` in `leader.zig` (2B-i-b); a follower consumes `append_entries` in
+//! `follower.zig` (2B-ii: leader claim, consistency check, truncate and append); commit and apply
+//! (2B-iii) land later without changing a signature. The pure decisions live in `election.zig`.
 //!
 //! Invariants: `check_invariants` states them: commit within the log, applied within commit,
 //! the term at least the last entry's term, no vote in term zero, `role == .leader` exactly
@@ -344,11 +345,8 @@ pub const Node = struct {
             // PreVote (thesis §9.6) never adopts a term on the strength of a would-be term.
             .pre_vote => |*request| node.step_pre_vote(request, member),
             .pre_vote_response => |*reply| node.step_pre_vote_response(reply, member),
-            // The term rules, then the sender is the leader of our term (replication is 2B).
-            .append_entries => {
-                node.step_term_only(head, member);
-                node.note_leader(head);
-            },
+            // The term rules, the leader claim and the log matching (`follower.zig`).
+            .append_entries => |*request| follower_module.step_append(node, request, member),
             .append_entries_response => |*reply| {
                 node.step_term_only(head, member); // A higher term deposes the leader first.
                 if (node.role == .leader and head.term == node.term) {
@@ -373,23 +371,6 @@ pub const Node = struct {
             .gt => if (member) node.become_follower(head.term),
         }
         assert(node.effects_len <= node.effects.len);
-    }
-
-    /// A member's `append_entries` at our term names it the leader: a candidate (or pre-candidate)
-    /// yields, the timer restarts, and `leader_changed` is emitted when the leader is news.
-    fn note_leader(node: *Node, head: *const Header) void {
-        assert(head.from != node.config.id);
-        assert(node.effects_len <= node.effects.len);
-        // One leader per term: only a voter may claim it, and the first claim stands.
-        if (!node_init.is_voter(node, head.from) or head.term != node.term) return;
-        if (node.role == .leader or (node.leader != .none and node.leader != head.from)) return;
-
-        node.role = .follower;
-        node.election_reset();
-        if (node.leader == head.from) return;
-        node.leader = head.from;
-        node.emit(.{ .leader_changed = head.from });
-        assert(node.leader != .none);
     }
 
     /// Thesis §3.4 / §5.4.1. A non-member earns nothing, at any term. A member at a stale term
@@ -704,7 +685,8 @@ pub const Node = struct {
     /// Adopts a strictly higher `new_term` in memory only: follower, vote cleared, leader
     /// unknown, timer restarted. Emits nothing, so the caller can still decide a vote and
     /// persist term and vote together. Returns the leader known before.
-    fn term_adopt(node: *Node, new_term: Term) NodeId {
+    /// Internal to the raft submodules (`follower.zig`); not part of the driver-facing surface.
+    pub fn term_adopt(node: *Node, new_term: Term) NodeId {
         assert(new_term.order(node.term) == .gt);
         assert(node.effects_len == 0);
 
@@ -721,7 +703,9 @@ pub const Node = struct {
         return leader_before;
     }
 
-    fn election_reset(node: *Node) void {
+    /// Restarts the election timer with a fresh timeout draw. Internal to the raft submodules
+    /// (`follower.zig`, `leader.zig`); not part of the driver-facing surface.
+    pub fn election_reset(node: *Node) void {
         node.election_elapsed = 0;
         const ticks = node.config.election_ticks;
         node.election_timeout = node_init.election_timeout_draw(node.rng, ticks);
@@ -730,7 +714,8 @@ pub const Node = struct {
     }
 
     /// Emits `save_hard_state` unless it equals the last one emitted.
-    fn emit_hard_state(node: *Node) void {
+    /// Internal to the raft submodules (`follower.zig`); not part of the driver-facing surface.
+    pub fn emit_hard_state(node: *Node) void {
         const hard_state: HardState = .{
             .term = node.term,
             .vote = node.vote,
@@ -770,6 +755,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const election = @import("election.zig");
+const follower_module = @import("follower.zig");
 const interfaces = @import("../interfaces.zig");
 const leader_module = @import("leader.zig");
 const log_module = @import("../log.zig");
