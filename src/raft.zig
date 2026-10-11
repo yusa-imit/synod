@@ -40,4 +40,6 @@ test {
     _ = @import("raft/node_leader_test.zig");
     // The leader response side (accepted, rejected, stale rounds) likewise.
     _ = @import("raft/node_leader_response_test.zig");
+    // The follower log-matching side (2B-ii) likewise.
+    _ = @import("raft/node_follower_test.zig");
 }

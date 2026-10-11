@@ -65,7 +65,7 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       `rejected` calls `on_rejected` and resends from the backtracked `next`. *Verify:* a
       rejection backs `next` up to the conflict run in one round trip; a response from a
       timed-out round never touches the new window. `blocked_by: none`
-- [ ] **2B-ii Follower log matching.** Split from 2B-i-a: the receive side. Consistency check with
+- [x] **2B-ii Follower log matching.** Split from 2B-i-a: the receive side. Consistency check with
       `Log.conflict_at`, truncate only a conflicting suffix (never committed entries, asserted),
       append, reply `accepted(match)` or `rejected(Conflict)`. *Verify:* Raft paper Figure 7
       follower logs (a)–(f) each converge to the leader's log; `log.validate()` after each step.
