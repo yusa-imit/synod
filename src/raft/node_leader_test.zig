@@ -191,7 +191,12 @@ fn replicate_all(rig: *Rig, count: usize, match: u64, next: u64) !void {
         slot.next = idx(next);
         slot.inflight_count = 0;
     }
-    try rig.node.check_invariants();
+    // A quorum at `match` has committed it, applied and persisted (the election entry is ours).
+    const node = &rig.node;
+    node.commit_index = idx(match);
+    node.applied_index = idx(match);
+    node.hard_state_saved.commit_index = idx(match);
+    try node.check_invariants();
 }
 
 const Snap = struct {
@@ -357,6 +362,7 @@ test "leader: propose appends then sends one append_entries to each peer that ca
             .term = 1,
             .prev = 1,
             .prev_term = 1,
+            .commit = 1,
             .entries = &want,
         });
     }
@@ -381,6 +387,7 @@ test "leader: each peer's batch starts at its own next index" {
         .term = 1,
         .prev = 0,
         .prev_term = 0,
+        .commit = 1,
         .entries = log_range(&entries, 1, 2),
     });
     try expect_request(try request_to(requests, 3), .{
@@ -388,6 +395,7 @@ test "leader: each peer's batch starts at its own next index" {
         .term = 1,
         .prev = 1,
         .prev_term = 1,
+        .commit = 1,
         .entries = log_range(&entries, 2, 2),
     });
 }
@@ -477,6 +485,7 @@ test "leader: after inflight_max unanswered sends a peer gets nothing more but o
             .term = 1,
             .prev = k + 1,
             .prev_term = 1,
+            .commit = 1,
             .entries = log_range(&entries, k + 2, k + 2),
         });
     }
@@ -525,6 +534,7 @@ test "leader: tick heartbeats every sendable peer each heartbeat_ticks, silent b
             .term = 1,
             .prev = 1,
             .prev_term = 1,
+            .commit = 1,
             .entries = &.{}, // Caught up: an empty heartbeat, prev = next - 1.
         });
         seen_rounds[t / 3 - 1] = (try request_to(requests, 2)).round;
@@ -634,9 +644,13 @@ test "leader: a single-voter cluster leads, proposes and ticks without sending a
     try testing.expectEqual(@as(usize, 0), fixtures.leader_progress(&rig.node).len);
 
     const effects = try propose(&rig, "z");
-    try testing.expectEqual(@as(usize, 1), effects.items.len);
+    // The lone voter commits at once: the entry, the commit's hard state, then its apply.
+    try testing.expectEqual(@as(usize, 3), effects.items.len);
     try testing.expect(effects.items[0] == .append);
+    try testing.expect(effects.items[1] == .save_hard_state);
+    try testing.expect(effects.items[2] == .apply);
     try testing.expectEqual(types.Index.zero.next().next(), rig.node.status().last_index);
+    try testing.expectEqual(rig.node.status().last_index, rig.node.status().commit_index);
     for (0..30) |_| try testing.expectEqual(@as(usize, 0), (try tick(&rig)).items.len);
 }
 

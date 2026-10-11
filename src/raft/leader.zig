@@ -18,7 +18,9 @@
 //! with a slot is matched to a live record of that slot by its echoed round id; anything else
 //! (a learner, a stranger, a dead or duplicate round) is dropped without a trace. `accepted` is
 //! range-checked against our own record (`prev <= matched <= last_sent`, never the peer's
-//! claim), feeds `Progress.on_accepted`, removes the record and sends the entries not yet sent.
+//! claim), feeds `Progress.on_accepted`, removes the record, advances the commit index when the
+//! peer's match grew (`commit.zig`, its `save_hard_state` ahead of the send) and sends the
+//! entries not yet sent.
 //! `rejected` feeds `Progress.on_rejected`: a live rejection discards the window and resends
 //! from the backtracked `next` at once; a stale one removes only its own record.
 //!
@@ -168,8 +170,8 @@ pub fn step_response(node: *Node, reply: *const AppendResponse) void {
             if (m > @intFromEnum(round.last_sent)) return;
             assert(m < std.math.maxInt(u64)); // `last_sent` came from a `u32` log count.
             remove_record(node, slot, at);
-            // Whether match advanced is consumed by commit advancement (item 2B-iii).
-            _ = p.on_accepted(matched);
+            // A new match may complete a quorum: persist the commit before the next send.
+            if (p.on_accepted(matched)) commit_module.advance_leader(node);
             if (@intFromEnum(p.next) <= node.log.count) send_slot(node, slot, peer);
         },
         .rejected => |conflict| if (p.on_rejected(conflict, round.prev)) {
@@ -180,11 +182,11 @@ pub fn step_response(node: *Node, reply: *const AppendResponse) void {
         },
     }
     assert(p.inflight_count <= p.inflight_max);
-    assert(node.effects_len <= node.progress_len);
+    assert(node.effects_len <= 2); // At most `save_hard_state` and one send.
 }
 
 /// The progress slot of `peer`, in `send_all` order, or null for a learner or a stranger.
-fn slot_of(node: *const Node, peer: NodeId) ?u32 {
+pub fn slot_of(node: *const Node, peer: NodeId) ?u32 {
     assert(peer != node.config.id);
     assert(node.progress_len <= node.progress.len);
 
@@ -364,6 +366,7 @@ fn is_outgoing_peer(node: *const Node, peer: NodeId) bool {
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const commit_module = @import("commit.zig");
 const election = @import("election.zig");
 const node_init = @import("node_init.zig");
 const node_module = @import("node.zig");

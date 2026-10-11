@@ -2,21 +2,25 @@
 //! `Effects`, `Role`, `Status`, the error sets, and `Node` (`init`, `deinit`, `step`, `status`,
 //! `entries`, `check_invariants`).
 //!
-//! Scope (plan 003 items 2A-i to 2A-iii, 2B-i, 2B-ii): skeleton, election, PreVote, the leader send
-//! and response sides, follower log matching. A node restores from `Restore`, validates and routes
-//! every received message, applies the term rules (a higher term from a known member makes a
-//! follower and persists once; a stale term is dropped), counts ticks, and rejects proposals unless
-//! it leads. An election timeout first runs a PreVote round (§9.6): a pre-candidate keeps its term
-//! and vote, sends `pre_vote` at `term + 1` and campaigns on a quorum of grants; a voter grants
-//! without adopting a term, persisting or resetting its timer. A lone voter and an expired
-//! candidate campaign directly. `request_vote` is granted once per term to an up-to-date candidate;
-//! granted responses are counted against a joint-shaped quorum, and a winner appends the empty
-//! entry of its term (§5.4.2), builds one `Progress` per other voter and sends each an
-//! `append_entries`. A leader then sends on `propose` and on heartbeat ticks (`leader.zig`); a
-//! round unanswered for `election_ticks` ticks times out. A leader consumes
+//! Scope (plan 003 items 2A-i to 2A-iii, 2B-i to 2B-iii): skeleton, election, PreVote, the leader
+//! send and response sides, follower log matching, commit and apply. A node restores from
+//! `Restore`, validates and routes every received message, applies the term rules (a higher term
+//! from a known member makes a follower and persists once; a stale term is dropped), counts ticks,
+//! and rejects proposals unless it leads. An election timeout first runs a PreVote round (§9.6): a
+//! pre-candidate keeps its term and vote, sends `pre_vote` at `term + 1` and campaigns on a quorum
+//! of grants; a voter grants without adopting a term, persisting or resetting its timer. A lone
+//! voter and an expired candidate campaign directly. `request_vote` is granted once per term to an
+//! up-to-date candidate; granted responses are counted against a joint-shaped quorum, and a winner
+//! appends the empty entry of its term (§5.4.2), builds one `Progress` per other voter and sends
+//! each an `append_entries`. A leader then sends on `propose` and on heartbeat ticks
+//! (`leader.zig`); a round unanswered for `election_ticks` ticks times out. A leader consumes
 //! `append_entries_response` in `leader.zig` (2B-i-b); a follower consumes `append_entries` in
-//! `follower.zig` (2B-ii: leader claim, consistency check, truncate and append); commit and apply
-//! (2B-iii) land later without changing a signature. The pure decisions live in `election.zig`.
+//! `follower.zig` (2B-ii: leader claim, consistency check, truncate and append). The commit index
+//! moves in `commit.zig` (2B-iii): a leader commits the highest current-term index a quorum of
+//! every voter set matches, a follower takes `min(leader_commit, last new entry)`, each advance is
+//! a `save_hard_state` ahead of the sends; `step` ends by emitting one `apply` for `(applied_index,
+//! commit_index]` before any `leader_changed`, so a restored node replays its committed prefix on
+//! its first step. The pure decisions live in `election.zig`.
 //!
 //! Invariants: `check_invariants` states them: commit within the log, applied within commit,
 //! the term at least the last entry's term, no vote in term zero, `role == .leader` exactly
@@ -26,7 +30,7 @@
 //!
 //! Allocation: `init` allocates everything the node will ever use from `gpa` (log slots, the
 //! `log_bytes_max` entry-byte arena, the member list, the `2 * voters_max` vote tally,
-//! `peers_max + 5` effect slots, and the leader's `2 * voters_max` `Progress` slots with
+//! `peers_max + 7` effect slots, and the leader's `2 * voters_max` `Progress` slots with
 //! `inflight_max` round records each). `step` and every other method take no allocator and never
 //! allocate (Tiger Style §1.9). `deinit` takes the same `gpa`; the node never stores it.
 //!
@@ -173,7 +177,7 @@ pub const Node = struct {
     /// `votes[0..votes_len]` is live and it holds no duplicate. `2 * voters_max` long.
     votes: []NodeId,
     votes_len: u32,
-    /// Effect slots, `peers_max + 5` long; `effects[0..effects_len]` is the last step's output.
+    /// Effect slots, `peers_max + 7` long; `effects[0..effects_len]` is the last step's output.
     effects: []Effect,
     effects_len: u32,
     /// Leader only: one `Progress` per other voter in `progress[0..progress_len]` (`leader.zig`).
@@ -290,6 +294,7 @@ pub const Node = struct {
             .tick => node.step_tick(),
             .propose => |data| try node.step_propose(data),
         }
+        commit_module.apply_ready(node); // After every send, before any `leader_changed`.
 
         assert(node.effects_len <= node.effects.len);
         return .{ .items = node.effects[0..node.effects_len] };
@@ -645,6 +650,9 @@ pub const Node = struct {
             node.emit(.{ .append = node.log.entries[count_before..count_after] });
         }
         leader_module.start(node, count_before);
+        // A lone voter commits its own entry at once; with peers this is a no-op, so no send
+        // precedes the `save_hard_state` it may emit.
+        commit_module.advance_leader(node);
         node.emit(.{ .leader_changed = node.config.id });
 
         assert(node.role == .leader);
@@ -662,9 +670,10 @@ pub const Node = struct {
         node.effects_len = 0;
         const last = node.log.count;
         node.emit(.{ .append = node.log.entries[last - 1 .. last] });
+        commit_module.advance_leader(node); // A lone voter commits at once, ahead of any send.
         leader_module.send_all(node);
         assert(node.effects_len >= 1);
-        assert(node.log.last_index().order(node.commit_index) == .gt);
+        assert(node.log.last_index().order(node.commit_index) != .lt);
     }
 
     /// Adopts a strictly higher `new_term`: follower, vote cleared, leader unknown, one
@@ -754,6 +763,7 @@ test {
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const commit_module = @import("commit.zig");
 const election = @import("election.zig");
 const follower_module = @import("follower.zig");
 const interfaces = @import("../interfaces.zig");

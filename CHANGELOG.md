@@ -69,6 +69,18 @@ All notable changes to this project are documented in this file. Format follows
   overflow rule replaces ADR-007's "store the prefix", which the ADR now amends).
   `leader_changed` is now emitted after the persist and send effects. `leader_commit` is
   ignored until 2B-iii. `src/raft/node_follower_test.zig` covers it, including a seeded model.
+- `src/raft/commit.zig` (plan 003 item 2B-iii): commit advancement and apply. A leader commits the
+  highest index a quorum of every voter set matches (joint configurations need both; learners
+  never count) whose entry has the leader's current term, so an older-term entry is never
+  committed by counting replicas (Raft Figure 8). A follower takes `min(leader_commit, last new
+  entry)` after an accepted append. Each advance is a `save_hard_state` ahead of the sends of
+  the step, and `commit_index` never decreases. `step` ends by emitting one `apply` for
+  `(applied_index, commit_index]` after the sends and before `leader_changed`, so a restored
+  node replays its committed prefix once, on its first step. A lone voter commits its election
+  entry and every proposal in the step that makes it. The effect array grows to `peers_max + 7`
+  slots (a follower's worst step now has eight effects); ADR-007 is amended. Existing leader,
+  response, election and follower tests are adjusted where they encoded the no-commit behaviour;
+  `src/raft/node_commit_test.zig` covers the new rules, including a seeded model.
 
 ### Changed
 

@@ -16,6 +16,8 @@ const types = @import("../types.zig");
 const node_module = @import("node.zig");
 const progress_module = @import("progress.zig");
 
+const AppendRequest = types.AppendRequest;
+const AppendResponse = types.AppendResponse;
 const Config = node_module.Config;
 const Configuration = types.Configuration;
 const Effect = node_module.Effect;
@@ -100,11 +102,11 @@ pub const config: Config = .{
     .message_limits = .{ .entries_max = 4, .entry_bytes_max = 32, .snapshot_bytes_max = 128 },
 };
 
-/// Slots an `Effects` view can hold: `peers_max + 5` with `peers_max = 2 * voters_max +
+/// Slots an `Effects` view can hold: `peers_max + 7` with `peers_max = 2 * voters_max +
 /// learners_max - 1` (ADR-007), derived here from `config`, never read from the node.
 pub fn effects_capacity(node_config: Config) u32 {
     const peers_max = 2 * node_config.voters_max + node_config.learners_max - 1;
-    return peers_max + 5;
+    return peers_max + 7;
 }
 
 pub fn restore_of(hard_state: HardState, entries: []const Entry) Restore {
@@ -372,4 +374,110 @@ pub fn expect_pre_vote_reply(effects: Effects, to: u64, term_value: u64, granted
 /// zero when the node does not lead.
 pub fn leader_progress(node: *Node) []Progress {
     return node.progress[0..node.progress_len];
+}
+
+// ---- commit and apply inspection (plan 003 item 2B-iii) -----------------------------------
+
+/// The one `append_entries` to `to` in `effects`; fails when there is none or several.
+pub fn append_to(effects: Effects, to: u64) !AppendRequest {
+    var found: ?AppendRequest = null;
+    for (effects.items) |effect| switch (effect) {
+        .send => |message| switch (message) {
+            .append_entries => |request| if (request.header.to == node_id(to)) {
+                try testing.expect(found == null);
+                found = request;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    return found orelse error.TestUnexpectedResult;
+}
+
+pub fn last_of(request: AppendRequest) u64 {
+    return @intFromEnum(request.prev_log_index) + request.entries.len;
+}
+
+pub fn index_of(effects: Effects, tag: std.meta.Tag(Effect)) ?usize {
+    for (effects.items, 0..) |effect, i| {
+        if (std.meta.activeTag(effect) == tag) return i;
+    }
+    return null;
+}
+
+pub fn last_hard_state(effects: Effects) !HardState {
+    var found: ?HardState = null;
+    for (effects.items) |effect| switch (effect) {
+        .save_hard_state => |hard_state| found = hard_state,
+        else => {},
+    };
+    return found orelse error.TestUnexpectedResult;
+}
+
+/// Exactly one `apply` effect, carrying `want` in order.
+pub fn expect_apply(effects: Effects, want: []const Entry) !void {
+    try testing.expectEqual(@as(u32, 1), count_effects(effects, .apply));
+    for (effects.items) |effect| switch (effect) {
+        .apply => |batch| try expect_entries_equal(want, batch),
+        else => {},
+    };
+}
+
+/// Nothing durable about commit and nothing applied.
+pub fn expect_quiet(effects: Effects) !void {
+    try testing.expectEqual(@as(u32, 0), count_effects(effects, .save_hard_state));
+    try testing.expectEqual(@as(u32, 0), count_effects(effects, .apply));
+}
+
+/// The one `append_entries_response` send in `effects`.
+pub fn reply_of(effects: Effects) !AppendResponse {
+    var found: ?AppendResponse = null;
+    for (effects.items) |effect| switch (effect) {
+        .send => |message| switch (message) {
+            .append_entries_response => |reply| {
+                try testing.expect(found == null);
+                found = reply;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    return found orelse error.TestUnexpectedResult;
+}
+
+/// The one reply accepts exactly `matched` and goes to `to`.
+pub fn expect_ack(effects: Effects, to: u64, matched: u64) !void {
+    const reply = try reply_of(effects);
+    try testing.expectEqual(node_id(to), reply.header.to);
+    const want: types.AppendOutcome = .{ .accepted = idx(matched) };
+    try testing.expectEqual(want, reply.outcome);
+}
+
+pub fn expect_rejected(effects: Effects) !void {
+    try testing.expect((try reply_of(effects)).outcome == .rejected);
+}
+
+/// An `append_entries` from `from` to node 1.
+pub fn append_request(
+    from: u64,
+    at_term: u64,
+    prev: u64,
+    prev_term: u64,
+    leader_commit: u64,
+    entries: []const Entry,
+) Message {
+    return .{ .append_entries = .{
+        .header = header_of(from, 1, at_term),
+        .prev_log_index = idx(prev),
+        .prev_log_term = term(prev_term),
+        .leader_commit = idx(leader_commit),
+        .round = 7,
+        .entries = entries,
+    } };
+}
+
+/// A restore at `hard_term` with `count` empty term-1 entries and the given commit index.
+pub fn log_restore(buffer: []Entry, count: u32, hard_term: u64, commit: u64) Restore {
+    const log = fill_entries(buffer, count, 1);
+    return restore_of(hard_state_of(hard_term, 0, commit), log);
 }

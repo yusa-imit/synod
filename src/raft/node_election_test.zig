@@ -329,9 +329,13 @@ test "election: a single-voter cluster elects itself in the tick that times out"
         defer rig.deinit(testing.allocator);
 
         const effects = try campaign(&rig);
-        try expect_leader(&rig, effects, 1, 0, 1);
-        const saved = try fixtures.only_hard_state(effects);
-        try testing.expectEqual(fixtures.hard_state_of(1, 1, 0), saved);
+        // The campaign's hard state, then the lone voter's commit of its own entry (2B-iii).
+        try expect_leader(&rig, effects, 1, 0, 2);
+        const campaigned = fixtures.hard_state_of(1, 1, 0);
+        try testing.expectEqual(campaigned, effects.items[0].save_hard_state);
+        const committed = fixtures.hard_state_of(1, 1, 1);
+        try testing.expectEqual(committed, try fixtures.last_hard_state(effects));
+        try testing.expectEqual(@as(u32, 1), fixtures.count_effects(effects, .apply));
         // Nobody to ask, learners included.
         try testing.expectEqual(@as(u32, 0), count_sends(effects, .request_vote));
     }

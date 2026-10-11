@@ -2,8 +2,8 @@
 //! item 2B-ii), as free functions over a `*Node`: the term and leader rules for an
 //! `append_entries`, the consistency check on `prev_log_index`/`prev_log_term`, the walk over the
 //! batch (matching entries skipped, the first conflicting one cuts the suffix) and the reply.
-//! `Node` owns the state; this file owns the rules. `leader_commit` is ignored here: commit
-//! advancement and apply are item 2B-iii.
+//! `Node` owns the state; this file owns the rules. An accepted append then moves the commit index
+//! to `min(leader_commit, last new entry)` (item 2B-iii, `commit.zig`).
 //!
 //! Rules, in order. A non-member is ignored at any term. A member at a stale term is refused with
 //! `rejected{0, 0}` at our term (the old leader learns the term and steps down); a member at a
@@ -19,7 +19,8 @@
 //! request therefore never shortens the log. At the first entry whose term differs, the suffix
 //! from that index is truncated and the rest of the batch is appended, its bytes copied into the
 //! node's arena (the request is borrowed until `step` returns). Effects leave in ADR-007 phase
-//! order: `save_hard_state`, `truncate`, one `append`, then the reply, then `leader_changed`.
+//! order: `save_hard_state`, `truncate`, one `append`, `save_hard_state` for a commit advance, then
+//! the reply, then (inserted by `Node.step`) `apply`, then `leader_changed`.
 //!
 //! Never below `commit_index`: a conflict at or below it contradicts Raft's safety argument, so
 //! only a faulty or hostile peer can send it. It is peer data, not a caller bug, hence no
@@ -37,9 +38,10 @@
 //! the leader's round timeout pace the retry. ADR-007 is amended to match.
 //!
 //! Invariants: after any call the log is contiguous from index 1, entry bytes are packed in
-//! index order (`bytes_used` is exact), `commit_index` is unchanged, and `leader_changed` is the
-//! last effect. Allocation: none; the effect array has room for the six effects of the worst
-//! case (hard state, truncate, append, reply, `leader_changed(none)`, `leader_changed(id)`).
+//! index order (`bytes_used` is exact), `commit_index` never decreased and is within the log, and
+//! `leader_changed` is the last effect. Allocation: none; the effect array has room for the
+//! eight effects of the worst case (hard state, truncate, append, hard state, reply, `apply`,
+//! `leader_changed(none)`, `leader_changed(id)`).
 //! Cost sketch: O(batch) to compare terms, O(batch + cut suffix) bytes counted for the capacity
 //! check, one `memcpy` per appended entry; `conflict_at` scans at most one term run backwards.
 
@@ -70,7 +72,8 @@ pub fn step_append(node: *Node, request: *const AppendRequest, member: bool) voi
 
     assert(node.term == head.term);
     assert(node.role != .leader or !bumped); // A bump made us a follower first.
-    assert(node.commit_index == commit_before); // Commit advances in item 2B-iii, not here.
+    assert(node.commit_index.order(commit_before) != .lt); // Commit never decreases.
+    assert(node.commit_index.order(node.log.last_index()) != .gt);
     var seen_notify = false;
     for (node.effects[0..node.effects_len]) |effect| {
         // `leader_changed` is the notify phase: nothing may follow it but its own kind.
@@ -126,6 +129,7 @@ fn replicate(node: *Node, request: *const AppendRequest) void {
     if (plan.keep < node.log.count) cut_log(node, plan.keep);
     append_rest(node, request.entries[plan.first..]);
     const matched = @intFromEnum(request.prev_log_index) + request.entries.len;
+    commit_module.advance_follower(node, request.leader_commit, matched);
     reply(node, request, .{ .accepted = @enumFromInt(matched) });
 }
 
@@ -220,6 +224,7 @@ fn reply(node: *Node, request: *const AppendRequest, outcome: types.AppendOutcom
 
 const std = @import("std");
 const assert = std.debug.assert;
+const commit_module = @import("commit.zig");
 const node_init = @import("node_init.zig");
 const node_module = @import("node.zig");
 const types = @import("../types.zig");

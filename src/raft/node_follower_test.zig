@@ -6,8 +6,9 @@
 //! byte arena. The reply `accepted(prev + entries.len)` leaves only after the persist effects.
 //!
 //! Expected values come from the Raft paper (Figure 7 logs, §5.3) and the plan's Verify line,
-//! never from `follower.zig`. Commit advancement (`leader_commit`) is item 2B-iii: every request
-//! here carries a non-zero `leader_commit` and `commit_index` must stay where it was.
+//! never from `follower.zig`. Commit advancement (`leader_commit`) is item 2B-iii and has its own
+//! tests (`node_commit_test.zig`): every request here carries `leader_commit` zero, so the log
+//! matching is tested alone and `commit_index` stays where it was.
 //!
 //! The model test drives random prefix-consistent leader/follower log pairs and compares every
 //! reply, effect and the resulting log with a naive array reference.
@@ -74,7 +75,7 @@ fn append_msg(
         .header = fixtures.header_of(from, 1, at_term),
         .prev_log_index = idx(prev),
         .prev_log_term = term(prev_term),
-        .leader_commit = idx(7),
+        .leader_commit = idx(0),
         .round = round,
         .entries = entries,
     } };
@@ -149,10 +150,12 @@ fn appended_of(effects: Effects) ![]const Entry {
     return &.{};
 }
 
-/// No durable effect and no send: what a dropped request may leave behind is `leader_changed`.
+/// No durable effect and no send: what a dropped request may leave behind is `leader_changed`
+/// and, on a restored node's first step, the one `apply` replaying its committed prefix.
 fn expect_dropped(effects: Effects) !void {
-    for (effects.items) |effect| try testing.expect(effect == .leader_changed);
-    try testing.expect(effects.items.len <= 1);
+    for (effects.items) |effect| try testing.expect(effect == .leader_changed or effect == .apply);
+    try testing.expect(fixtures.count_effects(effects, .apply) <= 1);
+    try testing.expect(fixtures.count_effects(effects, .leader_changed) <= 1);
 }
 
 fn expect_in_arena(rig: *const Rig, batch: []const Entry) !void {
@@ -888,4 +891,44 @@ test "follower: for every commit_index a conflict at or below it is dropped, abo
             try testing.expectEqual(idx(commit), rig.node.status().commit_index);
         }
     }
+}
+
+test "follower: the worst step fills every effect slot, with the commit saved after the append" {
+    // One voter per set: `peers_max = 1`, the smallest effect array (`peers_max + 7` = 8 slots).
+    var tight = cfg;
+    tight.voters_max = 1;
+    tight.learners_max = 0;
+    const incoming = [_]types.NodeId{node_id(2)};
+    const outgoing = [_]types.NodeId{node_id(3)};
+    var buffer: [2]Entry = undefined;
+    const start = log_from(&buffer, &.{ 1, 1 });
+    const restore = fixtures.restore_with(
+        .{ .voters = &incoming, .voters_outgoing = &outgoing, .learners = &.{} },
+        fixtures.hard_state_of(1, 0, 0),
+        start,
+    );
+    var rig: Rig = undefined;
+    try rig.init(testing.allocator, tight, &restore, 1);
+    defer rig.deinit(testing.allocator);
+    _ = try recv(&rig, append_msg(2, 1, 2, 1, 1, &.{})); // Node 2 leads term 1.
+
+    // Node 3 takes term 2, cuts our entry 2, appends its own and commits through it.
+    const fresh_tail = [_]Entry{entry_of(2, 2)};
+    var message = append_msg(3, 2, 1, 1, 2, &fresh_tail);
+    message.append_entries.leader_commit = idx(2);
+    const effects = try recv(&rig, message);
+    try testing.expectEqual(@as(usize, fixtures.effects_capacity(tight)), effects.items.len);
+    try testing.expectEqual(fixtures.hard_state_of(2, 0, 0), effects.items[0].save_hard_state);
+    try testing.expectEqual(idx(2), effects.items[1].truncate);
+    try fixtures.expect_entries_equal(&fresh_tail, effects.items[2].append);
+    try testing.expectEqual(fixtures.hard_state_of(2, 0, 2), effects.items[3].save_hard_state);
+    try expect_accepted_from(effects, 3, 2, 2, 2);
+    try fixtures.expect_entries_equal(&.{ start[0], fresh_tail[0] }, effects.items[5].apply);
+    try testing.expectEqual(types.NodeId.none, effects.items[6].leader_changed);
+    try testing.expectEqual(node_id(3), effects.items[7].leader_changed);
+}
+
+fn expect_accepted_from(effects: Effects, to: u64, round: u64, at_term: u64, matched: u64) !void {
+    const reply = try sole_reply(effects, to, round, at_term);
+    try testing.expectEqual(types.AppendOutcome{ .accepted = idx(matched) }, reply.outcome);
 }
