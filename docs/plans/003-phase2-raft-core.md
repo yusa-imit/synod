@@ -82,7 +82,7 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       *Verify:* 500 seeds pass in `zig build test` in < 10 s; a planted bug fails and
       reports its seed (harness-level: forged vote grants, so production code stays untouched).
       `blocked_by: none`
-- [ ] **2D `driver.zig` — Effect executor.** The `std.Io` boundary (ADR-002). Executes Effects
+- [x] **2D `driver.zig` — Effect executor.** The `std.Io` boundary (ADR-002). Executes Effects
       in ADR-007 order: `append`/`truncate`/`save_hard_state`, then `sync`, then `send`, then
       `apply`; store faults are fail-stop per ADR-006. *Verify:* three drivers over
       `MemoryStore`, a queue `Transport`, and a recording `StateMachine` elect a leader and
