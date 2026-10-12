@@ -75,12 +75,13 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       new index)`; emit `apply` in order, once. Why its own item: Figure 8 is the classic bug.
       *Verify:* a Figure 8 test (old-term entry never committed by counting); commit never
       decreases, asserted. `blocked_by: none`
-- [ ] **Model-based seeded cluster test.** Tiger Style §5's library form of simulation, ahead of
+- [x] **Model-based seeded cluster test.** Tiger Style §5's library form of simulation, ahead of
       Phase 3's `sim/`: a test-only harness (3 and 5 nodes, seeded delivery order, drops,
       duplicates, fake `Clock`/`Rng`) checks `check_invariants()` on every node after every
       step, plus election safety, log matching, leader completeness, state machine safety.
-      *Verify:* 500 seeds pass in `zig build test` in < 10 s; a planted bug (skip the
-      current-term commit rule) fails and reports its seed. `blocked_by: none`
+      *Verify:* 500 seeds pass in `zig build test` in < 10 s; a planted bug fails and
+      reports its seed (harness-level: forged vote grants, so production code stays untouched).
+      `blocked_by: none`
 - [ ] **2D `driver.zig` — Effect executor.** The `std.Io` boundary (ADR-002). Executes Effects
       in ADR-007 order: `append`/`truncate`/`save_hard_state`, then `sync`, then `send`, then
       `apply`; store faults are fail-stop per ADR-006. *Verify:* three drivers over
