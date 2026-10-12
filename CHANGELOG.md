@@ -7,6 +7,13 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- `src/raft/cluster_test.zig` (plan 003, model-based seeded cluster test): 500 seeds of 3 and 5
+  real `raft.Node`s driven by one PRNG (ticks, proposals, seeded delivery with drops and
+  duplicates), `check_invariants()` on every node after every step, and an oracle for election
+  safety, log matching, leader completeness, committed-prefix stability and state machine
+  safety. A seeded partition schedule makes leaders change and logs diverge (asserted across
+  seeds). Two planted harness-level faults (forged vote grants, flipped entry byte) must be
+  caught as specific violations and report their seed. Test-only; no API change.
 - `docs/adr/0007-raft-node-contract.md`: ADR-007 fixes the `raft.Node`, `Input`, `Effect`,
   `Config`, and `Driver` contract (plan 003 item 1). Docs only.
 - `src/raft/node.zig` (plan 003 item 2A-i): the `raft.Node` skeleton of ADR-007. `Config`,

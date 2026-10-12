@@ -44,4 +44,6 @@ test {
     _ = @import("raft/node_follower_test.zig");
     // Commit advancement and apply (2B-iii) likewise.
     _ = @import("raft/node_commit_test.zig");
+    // The model-based seeded cluster test (3 and 5 nodes, drops, duplicates) likewise.
+    _ = @import("raft/cluster_test.zig");
 }
