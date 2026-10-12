@@ -84,6 +84,9 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Changed
 
+- `src/raft/commit.zig`, `src/raft/node.zig`: review of item 8 — `match_of` treats a missing
+  `Progress` as a broken invariant instead of a silent 0; the lone-voter win asserts that a
+  commit move implies no peers, so `save_hard_state` precedes every send.
 - `tools/tidy.zig`: `is_core_purity_file` also covers every `.zig` file under `src/raft/` (an
   anchored prefix rule beside the five whole-path files), so `std.Io` is banned there too.
 - `src/raft.zig`: drops the unused `Error{NotImplemented}` stub set (ADR-007).

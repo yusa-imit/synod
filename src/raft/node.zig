@@ -652,7 +652,9 @@ pub const Node = struct {
         leader_module.start(node, count_before);
         // A lone voter commits its own entry at once; with peers this is a no-op, so no send
         // precedes the `save_hard_state` it may emit.
+        const commit_before = node.commit_index;
         commit_module.advance_leader(node);
+        if (node.commit_index != commit_before) assert(node.progress_len == 0);
         node.emit(.{ .leader_changed = node.config.id });
 
         assert(node.role == .leader);
