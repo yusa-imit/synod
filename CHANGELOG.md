@@ -7,6 +7,14 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- `src/driver.zig` (plan 003 item 2D): `Driver`, the `std.Io` boundary of ADR-007. `init` restores
+  the node from the `LogStore`; `receive`, `propose` and `poll` (clock to whole ticks, capped at
+  `ticks_per_poll_max`, remainder carried) step the node once per input and execute its effects
+  in phase order: persist, one `sync`, then send, then apply. An `unsynced` flag is asserted
+  clear before every send and apply, phases are asserted non-decreasing, and any `Fault` stops
+  the driver (`stopped`). `phase_ready` and `phase_ordered` are the pure checks. Tests in
+  `src/driver_test.zig`: three drivers elect a leader and apply 100 entries, ordering, faults,
+  restart replay, tick conversion, rejected inputs, allocation, and a 40-seed chaos model.
 - `src/raft/cluster_test.zig` (plan 003, model-based seeded cluster test): 500 seeds of 3 and 5
   real `raft.Node`s driven by one PRNG (ticks, proposals, seeded delivery with drops and
   duplicates), `check_invariants()` on every node after every step, and an oracle for election
