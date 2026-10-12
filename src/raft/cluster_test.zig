@@ -14,6 +14,11 @@
 //! fault (forged vote grants, `Mutation.forge_votes`) models a peer that lies about its vote
 //! and must be caught by some seed, without touching production code.
 //!
+//! Churn comes from a seeded partition schedule: a node (often the leader) is cut off for a
+//! while, keeps ticking and proposing, and rejoins with a stale or diverged log, so leaders
+//! change and followers truncate. Two planted faults, `forge_votes` and `flip_data`, must be
+//! caught as specific violations.
+//!
 //! Allocation: every node allocates through `std.testing.allocator`; the pool is fixed-size.
 
 const std = @import("std");
@@ -32,9 +37,10 @@ const steps_max = 500;
 const pool_max = 40;
 const index_max = 64;
 const data_max = 8;
-const entries_per_message = 4;
-const entry_bytes = 32;
 const seeds_count = 500;
+const partition_percent = 4; // Chance per step that a node is cut off from the network.
+const partition_min = 25;
+const partition_span = 60;
 
 /// Election timeouts land in [10, 20); the log is big enough that 500 steps rarely fill it.
 const node_config: node_module.Config = blk: {
@@ -44,6 +50,9 @@ const node_config: node_module.Config = blk: {
     break :blk result;
 };
 
+const entries_per_message = node_config.message_limits.entries_max;
+const entry_bytes = node_config.message_limits.entry_bytes_max;
+
 /// What the oracle found, or what the harness itself hit.
 const Violation = error{
     ElectionSafety,
@@ -51,6 +60,7 @@ const Violation = error{
     LeaderCompleteness,
     StateMachineSafety,
     CommitRegression,
+    CommittedOverwritten,
     ApplyOrder,
     HarnessLimit,
 };
@@ -59,13 +69,25 @@ const RunError = Violation || node_module.InvariantError || node_module.InitErro
     node_module.StepError || error{TestUnexpectedResult};
 
 /// A fault the harness injects to prove the oracle detects safety violations.
-const Mutation = enum { none, forge_votes };
+const Mutation = enum {
+    none,
+    /// A peer lies about its vote: every denied `request_vote_response` is delivered granted.
+    forge_votes,
+    /// The network flips one data byte of the first non-empty entry in a delivered append.
+    flip_data,
+};
 
 /// Where a run stopped; the seed alone replays it.
 const Report = struct { seed: u64 = 0, nodes: u32 = 0, step: u32 = 0 };
 
 /// Aggregate evidence that a run did real work, not just survived.
-const Stats = struct { leaders: u32 = 0, committed: u32 = 0, applied: u32 = 0 };
+const Stats = struct {
+    leaders: u32 = 0, // Distinct terms that had a leader.
+    committed: u32 = 0,
+    applied: u32 = 0,
+    truncates: u32 = 0, // `truncate` effects: a follower cut a diverged suffix.
+    digest: u64 = 0, // Hash of every node's final log, to pin replay equality.
+};
 
 /// One entry as the oracle remembers it: term, kind and bytes (never a borrowed slice).
 const Rec = struct {
@@ -167,6 +189,16 @@ const Oracle = struct {
         }
     }
 
+    /// A committed entry is never overwritten: node `slot`'s log still starts with the chosen
+    /// entries up to the commit index it last reported.
+    fn committed_prefix(oracle: *const Oracle, slot: usize, log: []const Entry) Violation!void {
+        const upto: usize = @intCast(oracle.seen_commit[slot]);
+        if (log.len < upto) return error.CommittedOverwritten;
+        for (log[0..upto], 1..) |entry, index| {
+            if (!oracle.chosen[index].eql(try Rec.of(entry))) return error.CommittedOverwritten;
+        }
+    }
+
     /// Leader completeness: a leader of `term` holds every entry committed in a term <= `term`.
     fn leader_completeness(oracle: *const Oracle, term: u64, log: []const Entry) Violation!void {
         var index: u64 = 1;
@@ -209,6 +241,15 @@ const Slot = struct {
         return slot;
     }
 
+    /// Corrupts one byte of the first non-empty entry, as a faulty network would.
+    fn flip(slot: *Slot) void {
+        for (0..slot.count) |k| {
+            if (slot.lens[k] == 0) continue;
+            slot.bytes[k * entry_bytes] ^= 0xff;
+            return;
+        }
+    }
+
     fn view(slot: *const Slot, out: *[entries_per_message]Entry) Message {
         var message = slot.message;
         if (message != .append_entries) return message;
@@ -221,6 +262,13 @@ const Slot = struct {
     }
 };
 
+/// Index of the node a message is addressed to; an unknown id is a harness bug.
+fn route(count: u32, message: *const Message) Violation!usize {
+    const to = @intFromEnum(message.header().to);
+    if (to == 0 or to > count) return error.HarnessLimit;
+    return @intCast(to - 1);
+}
+
 const Cluster = struct {
     count: u32,
     rigs: [nodes_max]fx.Rig,
@@ -232,6 +280,9 @@ const Cluster = struct {
     mutation: Mutation,
     stats: Stats,
     proposed: u8,
+    isolated: u8, // Node id cut off from the network, 0 for none.
+    isolated_until: u32,
+    step_no: u32,
 
     /// In place: each `Rig` owns the `Rng` its node points at, so it must never move.
     fn init(
@@ -249,6 +300,9 @@ const Cluster = struct {
         cluster.mutation = mutation;
         cluster.stats = .{};
         cluster.proposed = 0;
+        cluster.isolated = 0;
+        cluster.isolated_until = 0;
+        cluster.step_no = 0;
         errdefer cluster.deinit();
         const voters = if (count == 3) &fx.voters else &fx.voters5;
         const configuration: types.Configuration = .{
@@ -279,6 +333,7 @@ const Cluster = struct {
         } else { // A full network loses a random message, like any other drop.
             cluster.pool[cluster.prng.random().uintLessThan(u32, pool_max)] = slot;
         }
+        assert(cluster.pool_len > 0 and cluster.pool_len <= pool_max);
     }
 
     /// Everything that must hold after node `slot` took one step that produced `effects`.
@@ -294,6 +349,7 @@ const Cluster = struct {
                 try cluster.oracle.applied(slot, batch);
                 cluster.stats.applied += @intCast(batch.len);
             },
+            .truncate => cluster.stats.truncates += 1,
             else => {},
         };
         if (status.role == .leader) try cluster.oracle.leader(term, @intCast(slot + 1));
@@ -305,6 +361,7 @@ const Cluster = struct {
         for (cluster.rigs[0..cluster.count], 0..) |*rig, i| {
             try rig.node.check_invariants();
             const log = rig.node.entries();
+            try cluster.oracle.committed_prefix(i, log);
             if (i != stepped) try log_matching(stepped_log, log);
             const status = rig.node.status();
             if (status.role != .leader) continue;
@@ -319,24 +376,33 @@ const Cluster = struct {
 
     fn step_propose(cluster: *Cluster) RunError!void {
         const random = cluster.prng.random();
-        var slot = random.uintLessThan(usize, cluster.count);
-        for (0..cluster.count) |i| { // Prefer a node that believes it leads.
-            if (cluster.rigs[i].node.status().role == .leader) slot = i;
+        var leaders: [nodes_max]usize = undefined;
+        var leaders_len: usize = 0;
+        for (0..cluster.count) |i| { // Every node that believes it leads, a stale one included.
+            if (cluster.rigs[i].node.status().role != .leader) continue;
+            leaders[leaders_len] = i;
+            leaders_len += 1;
         }
+        const slot = if (leaders_len > 0)
+            leaders[random.uintLessThan(usize, leaders_len)]
+        else
+            random.uintLessThan(usize, cluster.count);
         cluster.proposed +%= 1;
         const data = [2]u8{ cluster.proposed, @intCast(slot + 1) };
         const effects = cluster.rigs[slot].node.step(.{ .propose = &data }) catch |err|
             switch (err) {
                 error.ProposeNotLeader, error.ProposeLogFull => return,
+                error.ProposeTooLarge => return error.ProposeTooLarge,
                 else => return err,
             };
         try cluster.observe(slot, effects);
     }
 
     fn step_deliver(cluster: *Cluster) RunError!void {
+        assert(cluster.pool_len > 0);
         const random = cluster.prng.random();
         const at = random.uintLessThan(u32, cluster.pool_len);
-        const local = cluster.pool[at];
+        var local = cluster.pool[at];
         const fate = random.uintLessThan(u32, 100);
         const duplicate = fate >= 10 and fate < 20;
         if (!duplicate) { // Delivered or dropped: leaves the pool. A duplicate stays for later.
@@ -344,24 +410,69 @@ const Cluster = struct {
             cluster.pool[at] = cluster.pool[cluster.pool_len];
         }
         if (fate < 10) return; // Dropped.
+        if (cluster.mutation == .flip_data) local.flip();
         var buffer: [entries_per_message]Entry = undefined;
         var message = local.view(&buffer);
         if (cluster.mutation == .forge_votes and message == .request_vote_response) {
             message.request_vote_response.granted = true;
         }
-        const to = @intFromEnum(message.header().to);
-        if (to == 0 or to > cluster.count) return error.HarnessLimit;
-        const slot: usize = @intCast(to - 1);
+        if (cluster.cut(&message)) return; // Lost to the partition.
+        const slot = try route(cluster.count, &message);
         const effects = try cluster.rigs[slot].node.step(.{ .message = &message });
         try cluster.observe(slot, effects);
     }
 
+    /// Whether the partition swallows `message`: one end is the isolated node.
+    fn cut(cluster: *const Cluster, message: *const Message) bool {
+        if (cluster.isolated == 0) return false;
+        const head = message.header();
+        const id = cluster.isolated;
+        return @intFromEnum(head.from) == id or @intFromEnum(head.to) == id;
+    }
+
+    /// Seeded partition schedule: sometimes cut one node (often the leader) off for a while;
+    /// its clock and proposals keep running, so stale leaders and diverging logs happen.
+    fn partition_update(cluster: *Cluster) void {
+        const random = cluster.prng.random();
+        cluster.step_no += 1;
+        if (cluster.isolated != 0) {
+            if (cluster.step_no >= cluster.isolated_until) cluster.isolated = 0;
+            return;
+        }
+        if (random.uintLessThan(u32, 100) >= partition_percent) return;
+        var victim = random.uintLessThan(usize, cluster.count);
+        if (random.boolean()) {
+            for (0..cluster.count) |i| {
+                if (cluster.rigs[i].node.status().role == .leader) victim = i;
+            }
+        }
+        cluster.isolated = @intCast(victim + 1);
+        cluster.isolated_until = cluster.step_no + partition_min +
+            random.uintLessThan(u32, partition_span);
+        if (random.boolean()) cluster.purge(cluster.isolated);
+    }
+
+    /// Drops every in-flight message to or from node `id` (a crash that loses its buffers).
+    fn purge(cluster: *Cluster, id: u8) void {
+        var at: u32 = 0;
+        while (at < cluster.pool_len) {
+            var scratch: [entries_per_message]Entry = undefined;
+            const message = cluster.pool[at].view(&scratch);
+            const head = message.header();
+            if (@intFromEnum(head.from) == id or @intFromEnum(head.to) == id) {
+                cluster.pool_len -= 1;
+                cluster.pool[at] = cluster.pool[cluster.pool_len];
+            } else at += 1;
+        }
+    }
+
     fn step_once(cluster: *Cluster) RunError!void {
+        cluster.partition_update();
         const random = cluster.prng.random();
         const roll = random.uintLessThan(u32, 100);
         if (roll < 25 or cluster.pool_len == 0) {
             try cluster.step_tick(random.uintLessThan(usize, cluster.count));
-        } else if (roll < 40) {
+        } else if (roll < 37) {
             try cluster.step_propose();
         } else {
             try cluster.step_deliver();
@@ -373,6 +484,15 @@ const Cluster = struct {
         stats.leaders = 0;
         for (cluster.oracle.leader_of_term) |id| stats.leaders += @intFromBool(id != 0);
         stats.committed = @intCast(cluster.oracle.chosen_max);
+        var hasher = std.hash.Wyhash.init(0);
+        for (cluster.rigs[0..cluster.count]) |*rig| {
+            for (rig.node.entries()) |entry| {
+                hasher.update(std.mem.asBytes(&entry.term));
+                hasher.update(entry.data);
+            }
+            hasher.update("|");
+        }
+        stats.digest = hasher.final();
         return stats;
     }
 };
@@ -395,6 +515,8 @@ test "cluster model: 500 seeds of 3 and 5 nodes keep every safety property" {
     var report: Report = .{};
     var seeds_led: u32 = 0;
     var seeds_committed: u32 = 0;
+    var seeds_turnover: u32 = 0;
+    var seeds_truncated: u32 = 0;
     var applied_total: u32 = 0;
     for (0..seeds_count) |seed| {
         const stats = run(seed, .none, &report) catch |err| {
@@ -405,43 +527,65 @@ test "cluster model: 500 seeds of 3 and 5 nodes keep every safety property" {
         };
         seeds_led += @intFromBool(stats.leaders > 0);
         seeds_committed += @intFromBool(stats.committed > 0);
+        seeds_turnover += @intFromBool(stats.leaders >= 2);
+        seeds_truncated += @intFromBool(stats.truncates > 0);
         applied_total += stats.applied;
     }
     // Progress: the harness is not vacuous. Elections happen and entries commit and apply.
     try testing.expect(seeds_led * 10 >= seeds_count * 9);
     try testing.expect(seeds_committed * 10 >= seeds_count * 9);
     try testing.expect(applied_total > 0);
+    // Churn: leaders change and logs diverge, so leader completeness and log matching bite.
+    try testing.expect(seeds_turnover * 5 >= seeds_count * 2);
+    try testing.expect(seeds_truncated * 10 >= seeds_count * 3);
 }
 
-test "cluster model: the same seed replays to the same outcome" {
+test "cluster model: the same seed replays to the same outcome and final logs" {
     var report: Report = .{};
     const first = try run(7, .none, &report);
     const second = try run(7, .none, &report);
     try testing.expectEqual(first, second);
+    try testing.expect(first.digest != 0);
+    const other = try run(8, .none, &report);
+    try testing.expect(other.digest != first.digest);
 }
 
-test "cluster model: planted bug of forged vote grants is detected and reports its seed" {
+/// Runs every seed under `mutation`: at least one must fail, every failure must be one of
+/// `allowed`, and the first failing seed must replay to the same error at the same step.
+fn expect_planted(mutation: Mutation, allowed: []const anyerror) !void {
     var report: Report = .{};
-    var found: ?u64 = null;
-    var violation: ?RunError = null;
+    var first: ?Report = null;
+    var first_error: anyerror = undefined;
     for (0..seeds_count) |seed| {
-        if (run(seed, .forge_votes, &report)) |_| continue else |err| {
-            found = report.seed;
-            violation = err;
-            break;
+        if (run(seed, mutation, &report)) |_| continue else |err| {
+            const permitted = std.mem.indexOfScalar(anyerror, allowed, err) != null;
+            if (!permitted) std.log.err("planted {s}: unexpected {s}", .{
+                @tagName(mutation), @errorName(err),
+            });
+            try testing.expect(permitted);
+            if (first == null) {
+                first = report;
+                first_error = err;
+            }
         }
     }
-    const seed = found orelse return error.PlantedBugUndetected;
-    try testing.expectEqual(seed, report.seed);
-    // The same seed fails the same way (reproducible), and passes without the planted bug.
+    const seen = first orelse return error.PlantedBugUndetected;
     var again: Report = .{};
-    try testing.expectError(violation.?, run(seed, .forge_votes, &again));
-    try testing.expectEqual(report.step, again.step);
-    _ = try run(seed, .none, &again);
+    try testing.expectError(first_error, run(seen.seed, mutation, &again));
+    try testing.expectEqual(seen.step, again.step);
+    _ = try run(seen.seed, .none, &again); // The seed is clean without the planted bug.
 }
 
-fn entry_of(index: u64, term: u64, data: []const u8) Entry {
-    return fx.entry(index, term, data);
+test "cluster model: forged vote grants are caught as election or leader safety" {
+    try expect_planted(.forge_votes, &.{ error.ElectionSafety, error.LeaderCompleteness });
+}
+
+test "cluster model: a flipped entry byte is caught as log matching or state machine safety" {
+    try expect_planted(.flip_data, &.{
+        error.LogMatching,
+        error.StateMachineSafety,
+        error.CommittedOverwritten,
+    });
 }
 
 test "oracle: two leaders in one term is an election safety violation" {
@@ -453,11 +597,11 @@ test "oracle: two leaders in one term is an election safety violation" {
 }
 
 test "oracle: equal terms with different bytes, or a diverged prefix, break log matching" {
-    const a = [_]Entry{ entry_of(1, 1, "a"), entry_of(2, 2, "b") };
-    const same = [_]Entry{ entry_of(1, 1, "a"), entry_of(2, 2, "b"), entry_of(3, 2, "c") };
-    const other_data = [_]Entry{ entry_of(1, 1, "a"), entry_of(2, 2, "x") };
-    const other_prefix = [_]Entry{ entry_of(1, 1, "z"), entry_of(2, 2, "b") };
-    const other_term = [_]Entry{ entry_of(1, 1, "a"), entry_of(2, 3, "x") };
+    const a = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "b") };
+    const same = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "b"), fx.entry(3, 2, "c") };
+    const other_data = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "x") };
+    const other_prefix = [_]Entry{ fx.entry(1, 1, "z"), fx.entry(2, 2, "b") };
+    const other_term = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 3, "x") };
     try log_matching(&a, &same);
     try log_matching(&a, &other_term); // Different terms at index 2 may differ.
     try testing.expectError(error.LogMatching, log_matching(&a, &other_data));
@@ -465,8 +609,8 @@ test "oracle: equal terms with different bytes, or a diverged prefix, break log 
 }
 
 test "oracle: commit regress, divergent commit, and incomplete leader are detected" {
-    const log = [_]Entry{ entry_of(1, 1, "a"), entry_of(2, 2, "b") };
-    const forked = [_]Entry{ entry_of(1, 1, "a"), entry_of(2, 2, "q") };
+    const log = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "b") };
+    const forked = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "q") };
     var oracle: Oracle = .{};
     try oracle.commit(0, 2, 2, &log);
     try testing.expectError(error.CommitRegression, oracle.commit(0, 2, 1, &log));
@@ -478,11 +622,11 @@ test "oracle: commit regress, divergent commit, and incomplete leader are detect
 }
 
 test "oracle: apply out of order, past commit, or diverging from the chosen entry is caught" {
-    const log = [_]Entry{ entry_of(1, 1, "a"), entry_of(2, 2, "b") };
+    const log = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "b") };
     var oracle: Oracle = .{};
     try oracle.commit(0, 2, 1, &log);
     try testing.expectError(error.ApplyOrder, oracle.applied(0, log[1..2])); // Skips index 1.
-    try testing.expectError(error.StateMachineSafety, oracle.applied(0, &.{entry_of(1, 1, "x")}));
+    try testing.expectError(error.StateMachineSafety, oracle.applied(0, &.{fx.entry(1, 1, "x")}));
     try oracle.applied(0, log[0..1]);
     try testing.expectError(error.ApplyOrder, oracle.applied(0, log[1..2])); // Not committed yet.
     try oracle.commit(0, 2, 2, &log);
@@ -492,11 +636,53 @@ test "oracle: apply out of order, past commit, or diverging from the chosen entr
 
 test "cluster model: a message slot keeps entry bytes after the sender's buffer changes" {
     var scratch = [_]u8{ 'a', 'b' };
-    const entries = [_]Entry{entry_of(1, 1, scratch[0..2])};
+    const entries = [_]Entry{fx.entry(1, 1, scratch[0..2])};
     const message = fx.append_request(2, 1, 0, 0, 0, &entries);
     const slot = try Slot.from(message);
     scratch = .{ 'z', 'z' };
     var out: [entries_per_message]Entry = undefined;
     const view = slot.view(&out);
     try testing.expectEqualStrings("ab", view.append_entries.entries[0].data);
+}
+
+test "oracle: an overwritten or shortened committed prefix is caught" {
+    const log = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "b") };
+    const rewritten = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 3, "b") };
+    var oracle: Oracle = .{};
+    try oracle.commit(0, 2, 2, &log);
+    try oracle.committed_prefix(0, &log);
+    try oracle.committed_prefix(1, &rewritten); // Node 1 committed nothing yet.
+    try testing.expectError(error.CommittedOverwritten, oracle.committed_prefix(0, &rewritten));
+    try testing.expectError(error.CommittedOverwritten, oracle.committed_prefix(0, log[0..1]));
+}
+
+test "harness: every HarnessLimit is provoked" {
+    var oracle: Oracle = .{};
+    const long = [_]Entry{fx.entry(1, 1, "123456789")}; // One byte above `data_max`.
+    try testing.expectError(error.HarnessLimit, oracle.commit(0, 1, 1, &long));
+    const short = [_]Entry{fx.entry(1, 1, "a")};
+    try testing.expectError(error.HarnessLimit, oracle.commit(0, 1, 2, &short)); // Past the log.
+    const misplaced = [_]Entry{fx.entry(5, 1, "a")};
+    try testing.expectError(error.HarnessLimit, oracle.commit(0, 1, 1, &misplaced));
+    var big: [index_max + 1]Entry = undefined;
+    for (&big, 1..) |*entry, index| entry.* = fx.entry(index, 1, "");
+    try testing.expectError(error.HarnessLimit, oracle.commit(0, 1, index_max + 1, &big));
+    try testing.expectError(error.HarnessLimit, oracle.leader(steps_max + 2, 1));
+    try testing.expectError(error.HarnessLimit, Rec.of(long[0]));
+
+    var many: [entries_per_message + 1]Entry = undefined;
+    for (&many, 1..) |*entry, index| entry.* = fx.entry(index, 1, "");
+    const crowded = fx.append_request(2, 1, 0, 0, 0, &many);
+    try testing.expectError(error.HarnessLimit, Slot.from(crowded));
+    var wide: [entry_bytes + 1]u8 = @splat('w');
+    const fat = [_]Entry{fx.entry(1, 1, &wide)};
+    const stuffed = fx.append_request(2, 1, 0, 0, 0, &fat);
+    try testing.expectError(error.HarnessLimit, Slot.from(stuffed));
+
+    const nowhere = fx.vote_request(1, 0, 1);
+    const beyond = fx.vote_request(1, 4, 1);
+    const there = fx.vote_request(1, 3, 1);
+    try testing.expectError(error.HarnessLimit, route(3, &nowhere));
+    try testing.expectError(error.HarnessLimit, route(3, &beyond));
+    try testing.expectEqual(@as(usize, 2), try route(3, &there));
 }
