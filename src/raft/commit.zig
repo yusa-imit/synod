@@ -34,7 +34,8 @@
 
 /// The leader's commit rule. Preconditions (asserted): the node leads and its per-peer progress
 /// is built (`leader.start` ran). Emits `save_hard_state` when the commit index moves, which is
-/// before any send of the step: call it before `leader.send_slot`/`send_all`.
+/// before any send of the step: call it before `leader.send_slot`/`send_all`. It runs only on a
+/// win, a propose, and an accepted response; a membership change (Phase 4) must call it too.
 pub fn advance_leader(node: *Node) void {
     assert(node.role == .leader);
     assert(node.progress_len <= node.progress.len);
@@ -125,7 +126,9 @@ fn match_of(node: *const Node, voter: NodeId) u64 {
     assert(voter != .none);
     assert(node.role == .leader);
     if (voter == node.config.id) return node.log.count;
-    const slot = leader_module.slot_of(node, voter) orelse return 0;
+    // Every voter of either set other than self got a `Progress` in `leader.start`, and
+    // `slot_of` searches that same set, so a miss is a broken invariant, not an input.
+    const slot = leader_module.slot_of(node, voter) orelse unreachable;
     assert(slot < node.progress_len);
     return @intFromEnum(node.progress[slot].match);
 }
