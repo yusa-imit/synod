@@ -104,6 +104,9 @@ const RecStore = struct {
     trace: *Trace,
     fail_append: ?LogStore.WriteError = null,
     fail_sync: bool = false,
+    fail_save: bool = false,
+    fail_get: bool = false,
+    fail_load: bool = false,
 
     pub fn append(self: *RecStore, entries: []const Entry) LogStore.WriteError!void {
         self.trace.push(.append);
@@ -117,6 +120,7 @@ const RecStore = struct {
     }
 
     pub fn get(self: *RecStore, index: Index) LogStore.ReadError!Entry {
+        if (self.fail_get) return error.StoreCorrupt;
         return self.inner.get(index);
     }
 
@@ -126,10 +130,12 @@ const RecStore = struct {
 
     pub fn save_hard_state(self: *RecStore, hs: *const HardState) LogStore.UpdateError!void {
         self.trace.push(.save_hard_state);
+        if (self.fail_save) return error.StoreIoFailed;
         return self.inner.save_hard_state(hs);
     }
 
     pub fn load_hard_state(self: *RecStore) LogStore.ReadError!HardState {
+        if (self.fail_load) return error.StoreIoFailed;
         return self.inner.load_hard_state();
     }
 
@@ -655,6 +661,47 @@ test "driver: a failing sync stops the driver before any reply or apply leaves" 
     try testing.expectEqual(@as(u32, 0), net.sent);
 }
 
+test "driver: a failing hard state save stops the driver before the vote or ack leaves" {
+    var net: Net = .{};
+    var peer: Peer = undefined;
+    try fault_peer(&peer, &net);
+    defer peer.destroy(testing.allocator);
+    peer.rec.fail_save = true;
+
+    peer.trace.len = 0;
+    try testing.expectError(
+        error.StoreIoFailed,
+        peer.driver.receive(testing.io, &fx.heartbeat(2, 1, 1)),
+    );
+    try testing.expect(peer.driver.stopped);
+    try testing.expectEqual(@as(u32, 1), peer.trace.count(.save_hard_state));
+    try testing.expectEqual(@as(u32, 0), peer.trace.count(.send));
+    try testing.expectEqual(@as(u32, 0), net.sent);
+}
+
+test "driver: init returns store read faults and a log past log_entries_max" {
+    var net: Net = .{};
+    var peer: Peer = undefined;
+    try peer.create(testing.allocator, 1, &net, 8, null);
+    defer peer.destroy(testing.allocator);
+    peer.log_entries = 2; // The node's cap is below what the store holds.
+    const log = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 1, "b"), fx.entry(3, 1, "c") };
+    try peer.store.append(&log);
+    try peer.store.save_hard_state(&fx.hard_state_of(1, 0, 0));
+
+    try testing.expectError(error.RestoreLogFull, peer.boot(testing.allocator)); // 3 > 2 slots.
+    try testing.expect(!peer.booted);
+    peer.log_entries = 8;
+    peer.rec.fail_get = true;
+    try testing.expectError(error.StoreCorrupt, peer.boot(testing.allocator));
+    peer.rec.fail_get = false;
+    peer.rec.fail_load = true;
+    try testing.expectError(error.StoreIoFailed, peer.boot(testing.allocator));
+    peer.rec.fail_load = false;
+    try peer.boot(testing.allocator); // The same store boots once the faults clear.
+    try testing.expectEqual(fx.idx(3), peer.status().last_index);
+}
+
 test "driver: a failing apply is returned and stops the driver after the durable reply" {
     var net: Net = .{};
     var peer: Peer = undefined;
@@ -810,6 +857,26 @@ test "driver: a stall longer than ticks_per_poll_max drops the extra ticks" {
 }
 
 // ---- 6. rejected inputs ---------------------------------------------------------------------
+
+test "driver: a stall of exactly ticks_per_poll_max keeps the remainder, one more drops it" {
+    var net: Net = .{};
+    var peer: Peer = undefined;
+    try tick_peer(&peer, &net);
+    defer peer.destroy(testing.allocator);
+
+    peer.clock.now += 3 * tick_ms + (tick_ms - 1); // Exactly the cap plus a partial tick.
+    try peer.poll();
+    try testing.expectEqual(@as(u32, 3), peer.elapsed());
+    peer.clock.now += 1; // The carried remainder completes one more tick.
+    try peer.poll();
+    try testing.expectEqual(@as(u32, 4), peer.elapsed());
+    peer.clock.now += 4 * tick_ms + (tick_ms - 1); // Cap plus one: the remainder is dropped.
+    try peer.poll();
+    try testing.expectEqual(@as(u32, 7), peer.elapsed());
+    peer.clock.now += 1;
+    try peer.poll();
+    try testing.expectEqual(@as(u32, 7), peer.elapsed());
+}
 
 test "driver: a rejected message or proposal returns its typed error and writes nothing" {
     var net: Net = .{};

@@ -86,7 +86,10 @@ pub const Driver = struct {
         assert(options.tick_ms > 0);
         assert(options.ticks_per_poll_max > 0);
 
-        const last: usize = @intCast(@intFromEnum(deps.store.last_index()));
+        const last_index = @intFromEnum(deps.store.last_index());
+        // Store data, not a caller contract: refuse before sizing the scratch slice from it.
+        if (last_index > config.log_entries_max) return error.RestoreLogFull;
+        const last: usize = @intCast(last_index);
         const scratch = try gpa.alloc(types.Entry, last);
         defer gpa.free(scratch);
 
