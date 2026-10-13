@@ -93,7 +93,7 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       split per message kind, never widen the baseline. Flip README rows for raft (election,
       replication) and driver. *Verify:* `zig build tidy` green; new table in `STATE.md`.
       `blocked_by: none`
-- [ ] **Release v0.4.0.** MINOR bump in `build.zig.zon`, CHANGELOG section, README install tag,
+- [x] **Release v0.4.0.** MINOR bump in `build.zig.zon`, CHANGELOG section, README install tag,
       annotated tag, GitHub release. Gate per `REALM.md`: 0 test failures, 6 cross-compile
       targets green, 0 open `bug` issues. *Verify:* `gh release view v0.4.0` succeeds and
       `zig fetch` of the tag resolves. `blocked_by: none`
