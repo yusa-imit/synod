@@ -88,7 +88,7 @@ choose while nothing pins synod; once zoltraak or silica does, changing them is 
       `MemoryStore`, a queue `Transport`, and a recording `StateMachine` elect a leader and
       apply the same 100 entries; a fixture sending before `sync` trips an assertion.
       `blocked_by: none`
-- [ ] **Re-measure the Tiger Style baseline.** Assert density, longest function, and tidy numbers
+- [x] **Re-measure the Tiger Style baseline.** Assert density, longest function, and tidy numbers
       for `src/raft/*` and `driver.zig`; `step()`'s dispatch is the likeliest 70-line breach —
       split per message kind, never widen the baseline. Flip README rows for raft (election,
       replication) and driver. *Verify:* `zig build tidy` green; new table in `STATE.md`.
