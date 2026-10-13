@@ -16,11 +16,12 @@ cluster/sentinel이 이 위로 이식될 예정이지만, 아래 "Status"에 나
 
 ## Status
 
-**Phase 1 implemented** — `types`, `interfaces`, `log`, and `store` are real, tested code. The
-Raft state machine (`raft`, `driver`), SWIM `membership`, `detector`, `clock`, `sim`, and
-`adapters` are still stubs (`error.NotImplemented`). The design in this README and in
-`docs/PRD.md` is the target shape; treat synod as unusable as a consensus library until Phase 2
-(`raft`) lands. `docs/plans/002-*.md` tracks the Phase 1 milestone.
+**Phase 2 implemented** — `types`, `interfaces`, `log`, `store`, the Raft node (`raft`: PreVote
+election, log replication, commit and apply) and `driver` are real, tested code. Snapshots,
+joint-consensus membership, ReadIndex and lease reads (Phase 4), SWIM `membership`, `detector`,
+`clock`, `sim`, and `adapters` are still stubs (`error.NotImplemented`). The design in this
+README and in `docs/PRD.md` is the target shape; treat synod as a pre-release consensus core
+until the v0.4.0 tag. `docs/plans/003-*.md` tracks the Phase 2 milestone.
 
 ## Modules
 
@@ -29,8 +30,8 @@ Raft state machine (`raft`, `driver`), SWIM `membership`, `detector`, `clock`, `
 | `synod.types` | NodeId, Term, Index, Entry, HardState, Snapshot, Message union, ConfChange. | implemented |
 | `synod.interfaces` | Transport, LogStore, StateMachine, Clock, Rng vtables. | implemented |
 | `synod.log` | In-memory Raft log with append/truncate/term lookup and invariant validation. | implemented |
-| `synod.raft` | Pure state machine: election (PreVote), replication, progress tracking, snapshot, joint-consensus membership, ReadIndex and lease reads. | planned |
-| `synod.driver` | Executes Effects against Transport / LogStore / StateMachine. | planned |
+| `synod.raft` | Pure state machine: election (PreVote), replication, progress tracking, commit and apply implemented; snapshot, joint-consensus membership, ReadIndex and lease reads planned (Phase 4). | partial |
+| `synod.driver` | Executes Effects against Transport / LogStore / StateMachine. | implemented |
 | `synod.membership` | SWIM gossip protocol: ping, ping-req, suspicion, incarnation numbers. | planned |
 | `synod.detector` | φ-accrual failure detector. | planned |
 | `synod.clock` | Hybrid logical clock, Lamport clock, monotonic Clock interface. | planned |

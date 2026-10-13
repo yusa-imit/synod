@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Tiger Style baseline re-measured over Phase 2 (plan 003 item 11); README status and the `raft`
+  and `driver` module rows now match the code. `zig build tidy` is clean and 495 tests pass.
+  Non-test lines / `assert` calls / longest function: `raft/node.zig` 791 / 84 / 66 (`init`),
+  `raft/leader.zig` 382 / 50 / 32, `raft/node_init.zig` 239 / 41 / 23, `raft/progress.zig`
+  204 / 37 / 19, `raft/follower.zig` 236 / 33 / 33, `raft/commit.zig` 145 / 24 / 24,
+  `raft/election.zig` 111 / 18 / 8, `driver.zig` 216 / 13 / 34 (`init`). No function exceeds 70
+  lines, so no split was needed and `tidy_baseline.txt` stays absent. `node.zig` is 9 lines
+  under the 800-line cap. No `@panic`, `std.debug.print` or `while (true)` in `src/raft/` or
+  `driver.zig`; the only `catch unreachable` (`driver.zig` `poll`) and two `@errorCast`
+  (`receive`, `propose`) carry proof comments.
+
 ### Added
 
 - `src/driver.zig` (plan 003 item 2D): `Driver`, the `std.Io` boundary of ADR-007. `init` restores
