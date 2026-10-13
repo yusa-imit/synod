@@ -42,10 +42,11 @@ until the v0.4.0 tag. `docs/plans/003-*.md` tracks the Phase 2 milestone.
 ## Install
 
 `v0.2.0` contains only the scaffold; `v0.3.0` is the first release with Phase 1 code
-(types, interfaces, log, in-memory store). To fetch a tag:
+(types, interfaces, log, in-memory store); `v0.4.0` adds the Phase 2 Raft core and driver.
+To fetch a tag:
 
 ```bash
-zig fetch --save https://github.com/yusa-imit/synod/archive/refs/tags/v0.3.0.tar.gz
+zig fetch --save https://github.com/yusa-imit/synod/archive/refs/tags/v0.4.0.tar.gz
 ```
 
 ```zig

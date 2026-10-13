@@ -21,10 +21,10 @@
 
 ## Phase 2 — Raft Election & Replication
 
-- [ ] 2A `raft/node.zig` — states, election, PreVote
-- [ ] 2B AppendEntries, commit advance, conflict resolution
-- [ ] 2C `raft/progress.zig`
-- [ ] 2D `driver.zig`
+- [x] 2A `raft/node.zig` — states, election, PreVote
+- [x] 2B AppendEntries, commit advance, conflict resolution
+- [x] 2C `raft/progress.zig`
+- [x] 2D `driver.zig`
 
 ## Phase 3 — Simulation Harness
 
