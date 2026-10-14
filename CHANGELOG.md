@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- `docs/adr/0008-simulator-contract.md` (plan 004 item 1): ADR-008 fixes the public `sim`
+  surface (`Simulation`, `Network`, `CrashStore`, `VirtualClock`, invariants, linearizability
+  checker, KV workload), per-concern seed streams, the crash model and the `zig build sim` CLI.
+
 ## [0.4.0] - 2026-10-14
 
 ### Changed
