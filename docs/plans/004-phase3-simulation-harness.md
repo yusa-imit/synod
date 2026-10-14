@@ -16,7 +16,7 @@ it into the public `sim` module (PRD §4.5) instead of growing a second harness.
 
 ## Scope
 
-- [ ] 1. **ADR-008 — simulator contract.** `architect` (opus), docs, no test. Decide: sim drives
+- [x] 1. **ADR-008 — simulator contract.** `architect` (opus), docs, no test. Decide: sim drives
       `Driver`s (so persist→sync→send→apply is exercised) and threads the caller's `io`; one root
       seed split into per-concern PRNG streams (adding a node must not reshuffle network draws);
       limits `nodes_max`, `messages_max`, `delay_ms_max`, `events_max`, `history_ops_max`,
