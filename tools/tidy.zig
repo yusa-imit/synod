@@ -300,6 +300,86 @@ pub fn is_core_purity_file(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".zig");
 }
 
+/// Simulator purity (ADR-008, plan 004 item 2): `src/sim.zig` and every `.zig` file under this
+/// anchored prefix must stay deterministic: no wall clock, file, socket, thread, process or
+/// system randomness, and no `Io` capability beyond passing `io` through.
+pub const sim_purity_dir = "src/sim/";
+
+/// Substrings banned in simulator-purity files. `std.Io` stays legal (ADR-008, "Purity and io").
+pub const sim_banned_patterns = .{
+    "std.time.",   "std.fs.",  "std.net.",          "std.Thread",    "std.process.",
+    "std.posix.",  "std.os.",  "std.crypto.random", "std.Random",    "Io.Clock",
+    "Io.Dir",      "Io.File",  "Io.net",            "Io.Mutex",      "Io.Group",
+    "Io.Threaded", "io.sleep", "io.async",          "io.concurrent",
+};
+
+/// True for the exact path `src/sim.zig` and any `.zig` file under the anchored `sim_purity_dir`
+/// prefix (`src/sim/a.zig` is `true`; `src/simx/a.zig`, `other/src/sim/a.zig`,
+/// `src/sim/notes.txt` and the bare directory `src/sim/` are `false`).
+pub fn is_sim_purity_file(path: []const u8) bool {
+    assert(path.len > 0);
+    comptime assert(sim_purity_dir.len > 0);
+
+    if (std.mem.eql(u8, path, "src/sim.zig")) return true;
+    if (!std.mem.startsWith(u8, path, sim_purity_dir)) return false;
+    if (path.len == sim_purity_dir.len) return false;
+    return std.mem.endsWith(u8, path, ".zig");
+}
+
+/// Bare tokens also banned in simulator-purity files: unlike the dotted `sim_banned_patterns`
+/// they catch an alias (`const t = std.time;`) and the C and system-random escape hatches.
+pub const sim_banned_tokens = .{
+    "std.time", "std.crypto", "std.c.", "std.os",   "std.posix",
+    "std.fs",   "io.random",  "io.now", "@cImport",
+};
+
+/// True if the first non-blank characters of `line` are `//` (a `//`, `///` or `//!` line).
+fn is_comment_line(line: []const u8) bool {
+    const trimmed = std.mem.trimStart(u8, line, " \t");
+    return std.mem.startsWith(u8, trimmed, "//");
+}
+
+/// Precondition: `path` and `source` outlive the returned slice; `path` is a sim-purity file.
+/// Postcondition: one `BannedPatternViolation` per non-comment line containing any
+/// `sim_banned_patterns` or `sim_banned_tokens` entry, naming the first entry that matched.
+pub fn check_sim_purity(
+    gpa: Allocator,
+    path: []const u8,
+    source: []const u8,
+) Allocator.Error![]BannedPatternViolation {
+    assert(path.len > 0);
+    assert(is_sim_purity_file(path));
+
+    var violations: std.ArrayList(BannedPatternViolation) = .empty;
+    errdefer violations.deinit(gpa);
+
+    var line_number: u32 = 0;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| {
+        line_number += 1;
+        if (is_comment_line(line)) continue;
+        const pattern = first_sim_match(line) orelse continue;
+        try violations.append(gpa, .{ .path = path, .line = line_number, .pattern = pattern });
+    }
+
+    assert(violations.items.len <= line_number);
+    return violations.toOwnedSlice(gpa);
+}
+
+/// The first `sim_banned_patterns` (then `sim_banned_tokens`) entry contained in `line`.
+fn first_sim_match(line: []const u8) ?[]const u8 {
+    assert(sim_banned_patterns.len > 0);
+    assert(sim_banned_tokens.len > 0);
+
+    inline for (sim_banned_patterns) |pattern| {
+        if (std.mem.indexOf(u8, line, pattern) != null) return pattern;
+    }
+    inline for (sim_banned_tokens) |token| {
+        if (std.mem.indexOf(u8, line, token) != null) return token;
+    }
+    return null;
+}
+
 /// Precondition: `path` and `source` outlive the returned slice.
 /// Postcondition: one `CatchUnreachableViolation` per line containing `catch unreachable`
 /// that has no `// proof:` comment on that same line or on the line immediately before it.
@@ -544,6 +624,7 @@ fn report_ban_violations(
     debug_print_violations: []const BannedPatternViolation,
     time_violations: []const BannedPatternViolation,
     io_violations: []const BannedPatternViolation,
+    sim_violations: []const BannedPatternViolation,
     wire_violations: []const WireUsizeViolation,
     missing_header: bool,
 ) bool {
@@ -560,7 +641,7 @@ fn report_ban_violations(
         stderr.writeStreamingAll(io, msg) catch {};
     }
     const banned_pattern_groups = [_][]const BannedPatternViolation{
-        debug_print_violations, time_violations, io_violations,
+        debug_print_violations, time_violations, io_violations, sim_violations,
     };
     for (banned_pattern_groups) |group| {
         for (group) |v| {
@@ -584,7 +665,7 @@ fn report_ban_violations(
     }
 
     return catch_violations.len > 0 or debug_print_violations.len > 0 or
-        time_violations.len > 0 or io_violations.len > 0 or
+        time_violations.len > 0 or io_violations.len > 0 or sim_violations.len > 0 or
         wire_violations.len > 0 or missing_header;
 }
 
@@ -630,6 +711,14 @@ fn check_file(
     defer if (is_core) gpa.free(io_purity_violations);
     if (!is_core) assert(io_purity_violations.len == 0);
 
+    // ADR-008: simulator files additionally ban every capability that breaks replay.
+    const is_sim = is_sim_purity_file(path);
+    const sim_violations = if (is_sim)
+        try check_sim_purity(gpa, path, source)
+    else
+        &[_]BannedPatternViolation{};
+    defer if (is_sim) gpa.free(sim_violations);
+
     const wire_violations = try check_wire_usize(gpa, path, source);
     defer gpa.free(wire_violations);
     const missing_header = !has_module_header(source);
@@ -640,6 +729,7 @@ fn check_file(
         debug_print_violations,
         time_violations,
         io_purity_violations,
+        sim_violations,
         wire_violations,
         missing_header,
     );
