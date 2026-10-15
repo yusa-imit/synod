@@ -7,6 +7,21 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- `src/sim/prng.zig`, `src/sim/clock.zig`, `src/sim/network.zig` (plan 004 item 2): `Prng`
+  (SplitMix64) with `derive_seed` per-concern streams, `VirtualClock`, and `Network`, a fixed
+  table `Transport` with seeded delay, loss, duplication, reorder, one-way cuts, partitions, the
+  planted faults `forge_votes` and `flip_data`, a trace hash and `check_invariants`. Allocates
+  only in `init`; `bytes_required` is exact. Tests: `prng_test`, `clock_test`, `network_test`,
+  a 200-seed FIFO-model and conservation test in `network_model_test`, shared `fixtures`.
+- `tools/tidy.zig` simulator purity gate (plan 004 item 2): `sim_purity_dir`,
+  `is_sim_purity_file`, `sim_banned_patterns` (ADR-008), `sim_banned_tokens` (bare `std.time`,
+  `std.crypto`, `std.os`, `std.posix`, `std.fs`, `std.c.`, `io.random`, `io.now`, `@cImport`)
+  and `check_sim_purity`, applied to `src/sim.zig` and `src/sim/**.zig`; comment lines are
+  skipped.
+
+- ADR-008 amendment (plan 004 item 2): `bytes_required` counts per-slot bookkeeping
+  (`Network.slot_meta_bytes`), `Network.check_invariants` and `InvariantError` join the surface,
+  and the `pop_due`, `drop_down`, duplicate and `set_partition` semantics are pinned.
 - `docs/adr/0008-simulator-contract.md` (plan 004 item 1): ADR-008 fixes the public `sim`
   surface (`Simulation`, `Network`, `CrashStore`, `VirtualClock`, invariants, linearizability
   checker, KV workload), per-concern seed streams, the crash model and the `zig build sim` CLI.

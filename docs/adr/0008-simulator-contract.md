@@ -106,6 +106,18 @@ asserts no `install_snapshot`. **Sizing** at `init`: `bytes_required = (messages
 (@sizeOf(Message) + entries_max * (@sizeOf(Entry) + entry_bytes_max))` plus a fixed
 `nodes_max^2` matrix; the sweep preset (256, 16, 32) is about 0.3 MiB.
 
+*Amendment (item 2).* Each in-flight slot also needs bookkeeping (due time, sequence, link,
+flags), so `bytes_required` adds `messages_max * Network.slot_meta_bytes` (`pub const`, 24).
+The reachability matrix is a fixed `[nodes_max][nodes_max]bool` inside `Network`, not a `gpa`
+allocation, so `bytes_required` is exactly what `init` requests. Item 2 also adds
+`Network.InvariantError = error{ NetworkStatsDiverged, NetworkTableOverfull }` and
+`check_invariants(network: *const Network) InvariantError!void` (the conservation identity
+`sent + duplicated == delivered + dropped_* + in_flight`, and `in_flight <= messages_max`);
+`pop_due` consumes a message cut at delivery and goes on to the next due one; `drop_down`
+reclassifies the last delivery (`delivered - 1`, `dropped_down + 1`); a duplicate is re-armed
+once (not itself duplicated) with a fresh delay draw; `set_partition` replaces earlier cuts;
+`send` draws loss then delay on every call, before the table-full check.
+
 **Crash store** (item 5):
 
 ```zig

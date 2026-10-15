@@ -24,7 +24,7 @@ it into the public `sim` module (PRD §4.5) instead of growing a second harness.
       (seed, event, violation) and `sim.Error`; PRD §4.5 `runUntil`/`check` in snake_case;
       layout `src/sim/*.zig`. *Verify:* `docs/adr/0008-*.md` merged; every `pub` symbol of
       items 2–10 named in it. `blocked_by: none`
-- [ ] 2. **3A-i `sim/clock.zig`, `sim/network.zig`.** First widen tidy's purity gate to
+- [x] 2. **3A-i `sim/clock.zig`, `sim/network.zig`.** First widen tidy's purity gate to
       `src/sim/` (no wall clock, fs, net, threads), as plan 003 did for `src/raft/`. Clock only
       moves forward (asserted). Network: fixed in-flight table promoted from `cluster_test`'s
       `Slot` (owned entry copies), seeded delay, loss and duplicate percent, reorder by delay,
