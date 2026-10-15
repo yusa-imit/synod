@@ -878,3 +878,105 @@ test "tidy: check_file_size_only propagates an error for a file that does not ex
         &[_]tidy.BaselineEntry{},
     ));
 }
+
+// -- Simulator purity (ADR-008, plan 004 item 2) -------------------------------------------
+
+/// The ADR-008 list, spelled out here so the tidy constant is checked against the contract.
+const adr_sim_banned = [_][]const u8{
+    "std.time.",    "std.fs.",    "std.net.",      "std.Thread",
+    "std.process.", "std.posix.", "std.os.",       "std.crypto.random",
+    "std.Random",   "Io.Clock",   "Io.Dir",        "Io.File",
+    "Io.net",       "Io.Mutex",   "Io.Group",      "Io.Threaded",
+    "io.sleep",     "io.async",   "io.concurrent",
+};
+
+/// Test fixture only: total violations of every `sim_banned_patterns` entry in `source`.
+fn sim_violation_count(source: []const u8) !usize {
+    var total: usize = 0;
+    inline for (tidy.sim_banned_patterns) |pattern| {
+        const path = "src/sim/x.zig";
+        const found = try tidy.check_banned_pattern(testing.allocator, path, source, pattern);
+        defer testing.allocator.free(found);
+        total += found.len;
+    }
+    return total;
+}
+
+test "tidy: sim_purity_dir is the anchored src/sim/ prefix" {
+    try testing.expectEqualStrings("src/sim/", tidy.sim_purity_dir);
+}
+
+test "tidy: sim_banned_patterns is exactly the ADR-008 list, in order" {
+    try testing.expectEqual(adr_sim_banned.len, tidy.sim_banned_patterns.len);
+    inline for (tidy.sim_banned_patterns, 0..) |pattern, i| {
+        try testing.expectEqualStrings(adr_sim_banned[i], pattern);
+    }
+}
+
+test "tidy: is_sim_purity_file is true for src/sim.zig and every .zig under src/sim/" {
+    const paths = [_][]const u8{
+        "src/sim.zig",         "src/sim/prng.zig",   "src/sim/clock.zig",
+        "src/sim/network.zig", "src/sim/x_test.zig", "src/sim/deeper/a.zig",
+    };
+    for (paths) |path| try testing.expect(tidy.is_sim_purity_file(path));
+}
+
+test "tidy: is_sim_purity_file prefix is anchored and directory-exact" {
+    try testing.expect(!tidy.is_sim_purity_file("src/simx/a.zig"));
+    try testing.expect(!tidy.is_sim_purity_file("src/sim_extra/a.zig"));
+    try testing.expect(!tidy.is_sim_purity_file("other/src/sim/a.zig"));
+    try testing.expect(!tidy.is_sim_purity_file("sim/a.zig"));
+    try testing.expect(!tidy.is_sim_purity_file("tools/src/sim/a.zig"));
+    try testing.expect(!tidy.is_sim_purity_file("src/sub/sim.zig"));
+    try testing.expect(!tidy.is_sim_purity_file("sim.zig"));
+    try testing.expect(!tidy.is_sim_purity_file("src/simulation.zig"));
+}
+
+test "tidy: is_sim_purity_file matches only .zig files under the directory" {
+    try testing.expect(!tidy.is_sim_purity_file("src/sim/notes.txt"));
+    try testing.expect(!tidy.is_sim_purity_file("src/sim/a.zig.orig"));
+    try testing.expect(!tidy.is_sim_purity_file("src/sim/"));
+    try testing.expect(!tidy.is_sim_purity_file("src/sim"));
+}
+
+test "tidy: sim purity does not make raft files simulator files or the reverse" {
+    try testing.expect(!tidy.is_sim_purity_file("src/raft.zig"));
+    try testing.expect(!tidy.is_sim_purity_file("src/raft/node.zig"));
+    try testing.expect(!tidy.is_core_purity_file("src/sim.zig"));
+    try testing.expect(!tidy.is_core_purity_file("src/sim/network.zig"));
+}
+
+test "tidy: std.time in a src/sim/ fixture is flagged by the sim patterns" {
+    const path = "src/sim/x.zig";
+    const source = "pub fn now() i64 {\n    return std.time.milliTimestamp();\n}\n";
+    try testing.expect(tidy.is_sim_purity_file(path));
+    const violations = try tidy.check_banned_pattern(testing.allocator, path, source, "std.time.");
+    defer testing.allocator.free(violations);
+    try testing.expectEqual(@as(usize, 1), violations.len);
+    try testing.expectEqual(@as(u32, 2), violations[0].line);
+    try testing.expectEqual(@as(usize, 1), try sim_violation_count(source));
+}
+
+test "tidy: every ADR-008 banned pattern is flagged once in a sim fixture line" {
+    inline for (adr_sim_banned) |pattern| {
+        const source = "const x = " ++ pattern ++ "foo;\n";
+        try testing.expect((try sim_violation_count(source)) >= 1);
+    }
+}
+
+test "tidy: std.Io is not banned in simulator files" {
+    const source =
+        \\pub fn step(simulation: *Simulation, io: std.Io) Error!void {
+        \\    var writer: *std.Io.Writer = undefined;
+        \\    _ = .{ simulation, io, writer };
+        \\}
+        \\
+    ;
+    try testing.expectEqual(@as(usize, 0), try sim_violation_count(source));
+}
+
+test "tidy: a clean sim fixture has no violations and every banned line is counted" {
+    try testing.expectEqual(@as(usize, 0), try sim_violation_count("const a = 1;\n"));
+    const dirty = "const a = std.Random.DefaultPrng;\nconst b = std.Thread.spawn;\n";
+    try testing.expectEqual(@as(usize, 2), try sim_violation_count(dirty));
+}

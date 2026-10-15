@@ -300,6 +300,24 @@ pub fn is_core_purity_file(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".zig");
 }
 
+/// Simulator purity (ADR-008, plan 004 item 2): `src/sim.zig` and every `.zig` file under this
+/// anchored prefix must stay deterministic. STUB: `is_sim_purity_file` is not implemented yet.
+pub const sim_purity_dir = "src/sim/";
+
+/// Substrings banned in simulator-purity files. `std.Io` stays legal (ADR-008, "Purity and io").
+pub const sim_banned_patterns = .{
+    "std.time.",   "std.fs.",  "std.net.",          "std.Thread",    "std.process.",
+    "std.posix.",  "std.os.",  "std.crypto.random", "std.Random",    "Io.Clock",
+    "Io.Dir",      "Io.File",  "Io.net",            "Io.Mutex",      "Io.Group",
+    "Io.Threaded", "io.sleep", "io.async",          "io.concurrent",
+};
+
+/// True for `src/sim.zig` and any `.zig` file under `sim_purity_dir`. STUB: always false.
+pub fn is_sim_purity_file(path: []const u8) bool {
+    assert(path.len > 0);
+    return false;
+}
+
 /// Precondition: `path` and `source` outlive the returned slice.
 /// Postcondition: one `CatchUnreachableViolation` per line containing `catch unreachable`
 /// that has no `// proof:` comment on that same line or on the line immediately before it.
