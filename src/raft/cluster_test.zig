@@ -5,12 +5,13 @@
 //! leader, or deliver one message from a pool of in-flight messages (in seeded order, with
 //! drops and duplicates). Every `send` effect goes back into the pool; time is logical ticks
 //! only, so a seed replays bit for bit. After EVERY step `check_invariants()` runs on every
-//! node and an `Oracle`, which sees only observable behavior (statuses, logs, apply effects),
-//! checks the four Raft safety properties: election safety, log matching, leader completeness
-//! and state machine safety. Persist and restore are out of scope (nodes never restart).
+//! node and the simulator's `invariants.Checker`, which sees only observable behavior
+//! (statuses, logs, apply effects), checks the five Raft safety properties: election safety,
+//! leader append-only, log matching, leader completeness and state machine safety. Persist and
+//! restore are out of scope (nodes never restart, so `Checker.restarted` is never called).
 //!
 //! A failing seed is reported in a `Report` (seed, node count, step) and by the error returned,
-//! so the run is reproducible. The planted-bug tests prove the oracle bites: a harness-level
+//! so the run is reproducible. The planted-bug tests prove the checker bites: a harness-level
 //! fault (forged vote grants, `Mutation.forge_votes`) models a peer that lies about its vote
 //! and must be caught by some seed, without touching production code.
 //!
@@ -27,6 +28,7 @@ const assert = std.debug.assert;
 const types = @import("../types.zig");
 const fx = @import("fixtures.zig");
 const node_module = @import("node.zig");
+const invariants = @import("../sim/invariants.zig");
 
 const Effects = node_module.Effects;
 const Entry = types.Entry;
@@ -53,22 +55,15 @@ const node_config: node_module.Config = blk: {
 const entries_per_message = node_config.message_limits.entries_max;
 const entry_bytes = node_config.message_limits.entry_bytes_max;
 
-/// What the oracle found, or what the harness itself hit.
-const Violation = error{
-    ElectionSafety,
-    LogMatching,
-    LeaderCompleteness,
-    StateMachineSafety,
-    CommitRegression,
-    CommittedOverwritten,
-    ApplyOrder,
-    HarnessLimit,
-};
+/// A limit of the harness itself (not a safety violation): a message that does not fit a slot
+/// or a destination that is no node.
+const HarnessError = error{HarnessLimit};
 
-const RunError = Violation || node_module.InvariantError || node_module.InitError ||
-    node_module.StepError || error{TestUnexpectedResult};
+const RunError = invariants.Violation || invariants.ObserveError || HarnessError ||
+    node_module.InvariantError || node_module.InitError || node_module.StepError ||
+    error{TestUnexpectedResult};
 
-/// A fault the harness injects to prove the oracle detects safety violations.
+/// A fault the harness injects to prove the checker detects safety violations.
 const Mutation = enum {
     none,
     /// A peer lies about its vote: every denied `request_vote_response` is delivered granted.
@@ -89,129 +84,6 @@ const Stats = struct {
     digest: u64 = 0, // Hash of every node's final log, to pin replay equality.
 };
 
-/// One entry as the oracle remembers it: term, kind and bytes (never a borrowed slice).
-const Rec = struct {
-    set: bool = false,
-    term: u64 = 0,
-    kind: types.EntryKind = .normal,
-    len: u8 = 0,
-    data: [data_max]u8 = @splat(0),
-
-    fn of(entry: Entry) Violation!Rec {
-        if (entry.data.len > data_max) return error.HarnessLimit;
-        var rec: Rec = .{ .set = true, .term = @intFromEnum(entry.term), .kind = entry.kind };
-        rec.len = @intCast(entry.data.len);
-        @memcpy(rec.data[0..entry.data.len], entry.data);
-        return rec;
-    }
-
-    fn eql(a: Rec, b: Rec) bool {
-        return a.term == b.term and a.kind == b.kind and a.len == b.len and
-            std.mem.eql(u8, a.data[0..a.len], b.data[0..b.len]);
-    }
-};
-
-fn entry_eql(a: Entry, b: Entry) bool {
-    return a.term == b.term and a.kind == b.kind and std.mem.eql(u8, a.data, b.data);
-}
-
-/// Log matching (Raft paper Figure 3): two logs holding the same term at an index agree on that
-/// entry and on everything before it. Checking the entry just before each equal-term index
-/// proves the whole prefix by induction.
-fn log_matching(a: []const Entry, b: []const Entry) Violation!void {
-    const common = @min(a.len, b.len);
-    for (0..common) |i| {
-        if (a[i].term != b[i].term) continue;
-        if (!entry_eql(a[i], b[i])) return error.LogMatching;
-        if (i > 0 and !entry_eql(a[i - 1], b[i - 1])) return error.LogMatching;
-    }
-}
-
-/// The black-box safety checker. It is told what happened and knows nothing of `Node` internals.
-const Oracle = struct {
-    leader_of_term: [steps_max + 2]u8 = @splat(0),
-    chosen: [index_max + 1]Rec = @splat(.{}),
-    chosen_term: [index_max + 1]u64 = @splat(0),
-    chosen_max: u64 = 0,
-    seen_commit: [nodes_max]u64 = @splat(0),
-    applied_len: [nodes_max]u64 = @splat(0),
-
-    /// Election safety: at most one leader per term.
-    fn leader(oracle: *Oracle, term: u64, id: u8) Violation!void {
-        if (term >= oracle.leader_of_term.len) return error.HarnessLimit;
-        const known = oracle.leader_of_term[term];
-        if (known != 0 and known != id) return error.ElectionSafety;
-        oracle.leader_of_term[term] = id;
-    }
-
-    /// Newly committed entries of node `slot` (log prefix up to `commit`) become chosen: the
-    /// first node to commit an index fixes it, and every other must agree (safety).
-    fn commit(
-        oracle: *Oracle,
-        slot: usize,
-        term: u64,
-        commit_index: u64,
-        log: []const Entry,
-    ) Violation!void {
-        if (commit_index < oracle.seen_commit[slot]) return error.CommitRegression;
-        if (commit_index > log.len or commit_index > index_max) return error.HarnessLimit;
-        var index = oracle.seen_commit[slot] + 1;
-        while (index <= commit_index) : (index += 1) {
-            const entry = log[@intCast(index - 1)];
-            if (@intFromEnum(entry.index) != index) return error.HarnessLimit;
-            try oracle.choose(index, entry, term);
-        }
-        oracle.seen_commit[slot] = commit_index;
-    }
-
-    fn choose(oracle: *Oracle, index: u64, entry: Entry, term: u64) Violation!void {
-        const rec = try Rec.of(entry);
-        const slot: usize = @intCast(index);
-        if (oracle.chosen[slot].set) {
-            if (!oracle.chosen[slot].eql(rec)) return error.StateMachineSafety;
-            return;
-        }
-        oracle.chosen[slot] = rec;
-        oracle.chosen_term[slot] = term;
-        oracle.chosen_max = @max(oracle.chosen_max, index);
-    }
-
-    /// State machine safety: node `slot` applies indices in order, once, each already chosen
-    /// (committed) and equal to what every other node applied at that index.
-    fn applied(oracle: *Oracle, slot: usize, batch: []const Entry) Violation!void {
-        for (batch) |entry| {
-            const index = @intFromEnum(entry.index);
-            if (index != oracle.applied_len[slot] + 1) return error.ApplyOrder;
-            if (index > oracle.seen_commit[slot]) return error.ApplyOrder;
-            const chosen = oracle.chosen[@intCast(index)];
-            if (!chosen.set or !chosen.eql(try Rec.of(entry))) return error.StateMachineSafety;
-            oracle.applied_len[slot] = index;
-        }
-    }
-
-    /// A committed entry is never overwritten: node `slot`'s log still starts with the chosen
-    /// entries up to the commit index it last reported.
-    fn committed_prefix(oracle: *const Oracle, slot: usize, log: []const Entry) Violation!void {
-        const upto: usize = @intCast(oracle.seen_commit[slot]);
-        if (log.len < upto) return error.CommittedOverwritten;
-        for (log[0..upto], 1..) |entry, index| {
-            if (!oracle.chosen[index].eql(try Rec.of(entry))) return error.CommittedOverwritten;
-        }
-    }
-
-    /// Leader completeness: a leader of `term` holds every entry committed in a term <= `term`.
-    fn leader_completeness(oracle: *const Oracle, term: u64, log: []const Entry) Violation!void {
-        var index: u64 = 1;
-        while (index <= oracle.chosen_max) : (index += 1) {
-            const slot: usize = @intCast(index);
-            if (oracle.chosen_term[slot] > term) continue;
-            if (index > log.len) return error.LeaderCompleteness;
-            const rec = try Rec.of(log[slot - 1]);
-            if (!oracle.chosen[slot].eql(rec)) return error.LeaderCompleteness;
-        }
-    }
-};
-
 /// A message in flight, owned by value: entry bytes are copied out of the sender's borrowed
 /// effects. `view` rebuilds the borrowed slices on the caller's stack, so slots can move freely.
 const Slot = struct {
@@ -221,7 +93,7 @@ const Slot = struct {
     lens: [entries_per_message]u8,
     bytes: [entries_per_message * entry_bytes]u8,
 
-    fn from(message: Message) Violation!Slot {
+    fn from(message: Message) HarnessError!Slot {
         var slot: Slot = undefined;
         slot.message = message;
         slot.count = 0;
@@ -263,7 +135,7 @@ const Slot = struct {
 };
 
 /// Index of the node a message is addressed to; an unknown id is a harness bug.
-fn route(count: u32, message: *const Message) Violation!usize {
+fn route(count: u32, message: *const Message) HarnessError!usize {
     const to = @intFromEnum(message.header().to);
     if (to == 0 or to > count) return error.HarnessLimit;
     return @intCast(to - 1);
@@ -276,7 +148,7 @@ const Cluster = struct {
     pool: [pool_max]Slot,
     pool_len: u32,
     prng: std.Random.DefaultPrng,
-    oracle: Oracle,
+    checker: invariants.Checker,
     mutation: Mutation,
     stats: Stats,
     proposed: u8,
@@ -292,18 +164,27 @@ const Cluster = struct {
         mutation: Mutation,
     ) node_module.InitError!void {
         assert(count == 3 or count == 5);
+        const checker_options: invariants.Checker.Options = .{
+            .nodes_count = @intCast(count),
+            .log_entries_max = index_max,
+            // A term rises by one per candidate tick, one tick per step.
+            .terms_max = steps_max + 2,
+        };
+        try cluster.checker.init(testing.allocator, checker_options);
+        errdefer cluster.checker.deinit(testing.allocator);
+
         cluster.count = count;
         cluster.inited = 0;
         cluster.pool_len = 0;
         cluster.prng = std.Random.DefaultPrng.init(seed);
-        cluster.oracle = .{};
         cluster.mutation = mutation;
         cluster.stats = .{};
         cluster.proposed = 0;
         cluster.isolated = 0;
         cluster.isolated_until = 0;
         cluster.step_no = 0;
-        errdefer cluster.deinit();
+        errdefer cluster.deinit_rigs();
+
         const voters = if (count == 3) &fx.voters else &fx.voters5;
         const configuration: types.Configuration = .{
             .voters = voters,
@@ -321,11 +202,16 @@ const Cluster = struct {
     }
 
     fn deinit(cluster: *Cluster) void {
+        cluster.deinit_rigs();
+        cluster.checker.deinit(testing.allocator);
+    }
+
+    fn deinit_rigs(cluster: *Cluster) void {
         for (cluster.rigs[0..cluster.inited]) |*rig| rig.deinit(testing.allocator);
         cluster.inited = 0;
     }
 
-    fn enqueue(cluster: *Cluster, message: Message) Violation!void {
+    fn enqueue(cluster: *Cluster, message: Message) HarnessError!void {
         const slot = try Slot.from(message);
         if (cluster.pool_len < pool_max) {
             cluster.pool[cluster.pool_len] = slot;
@@ -336,37 +222,33 @@ const Cluster = struct {
         assert(cluster.pool_len > 0 and cluster.pool_len <= pool_max);
     }
 
-    /// Everything that must hold after node `slot` took one step that produced `effects`.
+    /// Everything that must hold after node `slot` took one step that produced `effects`:
+    /// the checker sees every node's status and log first, then the apply effects (an apply
+    /// is only legal up to a commit the checker has already seen).
     fn observe(cluster: *Cluster, slot: usize, effects: Effects) RunError!void {
         try fx.expect_effects_ordered(effects, node_config);
-        const status = cluster.rigs[slot].node.status();
-        const term = @intFromEnum(status.term);
-        const log = cluster.rigs[slot].node.entries();
-        try cluster.oracle.commit(slot, term, @intFromEnum(status.commit_index), log);
+        var observed: [nodes_max]invariants.Observation = undefined;
+        for (cluster.rigs[0..cluster.count], 0..) |*rig, i| {
+            try rig.node.check_invariants();
+            observed[i] = .{
+                .node_index = @intCast(i),
+                .status = rig.node.status(),
+                .log = rig.node.entries(),
+            };
+        }
+        try cluster.checker.observe(observed[0..cluster.count]);
         for (effects.items) |effect| switch (effect) {
             .send => |message| try cluster.enqueue(message),
             .apply => |batch| {
-                try cluster.oracle.applied(slot, batch);
+                for (batch) |*entry| {
+                    const print = invariants.fingerprint(entry);
+                    try cluster.checker.applied(@intCast(slot), entry.index, print);
+                }
                 cluster.stats.applied += @intCast(batch.len);
             },
             .truncate => cluster.stats.truncates += 1,
             else => {},
         };
-        if (status.role == .leader) try cluster.oracle.leader(term, @intCast(slot + 1));
-        try cluster.check_all(slot);
-    }
-
-    fn check_all(cluster: *Cluster, stepped: usize) RunError!void {
-        const stepped_log = cluster.rigs[stepped].node.entries();
-        for (cluster.rigs[0..cluster.count], 0..) |*rig, i| {
-            try rig.node.check_invariants();
-            const log = rig.node.entries();
-            try cluster.oracle.committed_prefix(i, log);
-            if (i != stepped) try log_matching(stepped_log, log);
-            const status = rig.node.status();
-            if (status.role != .leader) continue;
-            try cluster.oracle.leader_completeness(@intFromEnum(status.term), log);
-        }
     }
 
     fn step_tick(cluster: *Cluster, slot: usize) RunError!void {
@@ -481,9 +363,8 @@ const Cluster = struct {
 
     fn finish(cluster: *Cluster) Stats {
         var stats = cluster.stats;
-        stats.leaders = 0;
-        for (cluster.oracle.leader_of_term) |id| stats.leaders += @intFromBool(id != 0);
-        stats.committed = @intCast(cluster.oracle.chosen_max);
+        stats.leaders = cluster.checker.stats().leader_terms;
+        stats.committed = @intCast(cluster.checker.stats().committed_max);
         var hasher = std.hash.Wyhash.init(0);
         for (cluster.rigs[0..cluster.count]) |*rig| {
             for (rig.node.entries()) |entry| {
@@ -584,54 +465,7 @@ test "cluster model: a flipped entry byte is caught as log matching or state mac
     try expect_planted(.flip_data, &.{
         error.LogMatching,
         error.StateMachineSafety,
-        error.CommittedOverwritten,
     });
-}
-
-test "oracle: two leaders in one term is an election safety violation" {
-    var oracle: Oracle = .{};
-    try oracle.leader(3, 1);
-    try oracle.leader(3, 1); // The same leader again is fine.
-    try oracle.leader(4, 2);
-    try testing.expectError(error.ElectionSafety, oracle.leader(3, 2));
-}
-
-test "oracle: equal terms with different bytes, or a diverged prefix, break log matching" {
-    const a = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "b") };
-    const same = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "b"), fx.entry(3, 2, "c") };
-    const other_data = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "x") };
-    const other_prefix = [_]Entry{ fx.entry(1, 1, "z"), fx.entry(2, 2, "b") };
-    const other_term = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 3, "x") };
-    try log_matching(&a, &same);
-    try log_matching(&a, &other_term); // Different terms at index 2 may differ.
-    try testing.expectError(error.LogMatching, log_matching(&a, &other_data));
-    try testing.expectError(error.LogMatching, log_matching(&a, &other_prefix));
-}
-
-test "oracle: commit regress, divergent commit, and incomplete leader are detected" {
-    const log = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "b") };
-    const forked = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "q") };
-    var oracle: Oracle = .{};
-    try oracle.commit(0, 2, 2, &log);
-    try testing.expectError(error.CommitRegression, oracle.commit(0, 2, 1, &log));
-    try testing.expectError(error.StateMachineSafety, oracle.commit(1, 2, 2, &forked));
-    try oracle.leader_completeness(2, &log);
-    try oracle.leader_completeness(1, log[0..1]); // Index 2 was committed in term 2 > 1.
-    try testing.expectError(error.LeaderCompleteness, oracle.leader_completeness(3, log[0..1]));
-    try testing.expectError(error.LeaderCompleteness, oracle.leader_completeness(3, &forked));
-}
-
-test "oracle: apply out of order, past commit, or diverging from the chosen entry is caught" {
-    const log = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "b") };
-    var oracle: Oracle = .{};
-    try oracle.commit(0, 2, 1, &log);
-    try testing.expectError(error.ApplyOrder, oracle.applied(0, log[1..2])); // Skips index 1.
-    try testing.expectError(error.StateMachineSafety, oracle.applied(0, &.{fx.entry(1, 1, "x")}));
-    try oracle.applied(0, log[0..1]);
-    try testing.expectError(error.ApplyOrder, oracle.applied(0, log[1..2])); // Not committed yet.
-    try oracle.commit(0, 2, 2, &log);
-    try oracle.applied(0, log[1..2]);
-    try testing.expectError(error.ApplyOrder, oracle.applied(0, log[1..2])); // Twice.
 }
 
 test "cluster model: a message slot keeps entry bytes after the sender's buffer changes" {
@@ -645,31 +479,7 @@ test "cluster model: a message slot keeps entry bytes after the sender's buffer 
     try testing.expectEqualStrings("ab", view.append_entries.entries[0].data);
 }
 
-test "oracle: an overwritten or shortened committed prefix is caught" {
-    const log = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 2, "b") };
-    const rewritten = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 3, "b") };
-    var oracle: Oracle = .{};
-    try oracle.commit(0, 2, 2, &log);
-    try oracle.committed_prefix(0, &log);
-    try oracle.committed_prefix(1, &rewritten); // Node 1 committed nothing yet.
-    try testing.expectError(error.CommittedOverwritten, oracle.committed_prefix(0, &rewritten));
-    try testing.expectError(error.CommittedOverwritten, oracle.committed_prefix(0, log[0..1]));
-}
-
-test "harness: every HarnessLimit is provoked" {
-    var oracle: Oracle = .{};
-    const long = [_]Entry{fx.entry(1, 1, "123456789")}; // One byte above `data_max`.
-    try testing.expectError(error.HarnessLimit, oracle.commit(0, 1, 1, &long));
-    const short = [_]Entry{fx.entry(1, 1, "a")};
-    try testing.expectError(error.HarnessLimit, oracle.commit(0, 1, 2, &short)); // Past the log.
-    const misplaced = [_]Entry{fx.entry(5, 1, "a")};
-    try testing.expectError(error.HarnessLimit, oracle.commit(0, 1, 1, &misplaced));
-    var big: [index_max + 1]Entry = undefined;
-    for (&big, 1..) |*entry, index| entry.* = fx.entry(index, 1, "");
-    try testing.expectError(error.HarnessLimit, oracle.commit(0, 1, index_max + 1, &big));
-    try testing.expectError(error.HarnessLimit, oracle.leader(steps_max + 2, 1));
-    try testing.expectError(error.HarnessLimit, Rec.of(long[0]));
-
+test "harness: every HarnessLimit of the slots and the router is provoked" {
     var many: [entries_per_message + 1]Entry = undefined;
     for (&many, 1..) |*entry, index| entry.* = fx.entry(index, 1, "");
     const crowded = fx.append_request(2, 1, 0, 0, 0, &many);

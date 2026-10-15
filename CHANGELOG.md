@@ -7,6 +7,12 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- `src/sim/invariants.zig` (plan 004 item 3): `Checker` with five safety properties (election
+  safety, leader append-only, log matching, leader completeness, state machine safety), driven
+  by `Observation`s and applied records, blind to `Node` internals; latches the first
+  violation per property. Allocates only in `init`. `raft/cluster_test.zig` now uses it and
+  its private `Oracle` is gone (`CommitRegression`, `CommittedOverwritten`, `ApplyOrder` fold
+  into `StateMachineSafety`).
 - `src/sim/prng.zig`, `src/sim/clock.zig`, `src/sim/network.zig` (plan 004 item 2): `Prng`
   (SplitMix64) with `derive_seed` per-concern streams, `VirtualClock`, and `Network`, a fixed
   table `Transport` with seeded delay, loss, duplication, reorder, one-way cuts, partitions, the
