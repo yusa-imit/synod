@@ -31,7 +31,7 @@ it into the public `sim` module (PRD §4.5) instead of growing a second harness.
       partitions as a reachability matrix; a full table drops and counts, never grows.
       *Failing test first:* tidy flags a `src/sim/` fixture using `std.time`; one seed run twice
       gives the same delivery-trace hash; a cut pair never delivers. `blocked_by: none`
-- [ ] 3. **3B `sim/invariants.zig` — five safety properties.** Promote `cluster_test`'s `Oracle`
+- [x] 3. **3B `sim/invariants.zig` — five safety properties.** Promote `cluster_test`'s `Oracle`
       and add the missing *leader append-only* (a leader never truncates or overwrites its own
       log in its term). Pure over observations, blind to `Node` internals; `cluster_test`
       imports it in the same PR so no duplicate outlives a cycle. *Failing test first:* per

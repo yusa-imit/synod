@@ -3,7 +3,8 @@
 //!
 //! Files (see docs/adr/0008-simulator-contract.md and docs/plans/004-phase3-simulation-harness.md):
 //!   - `sim/prng.zig`, `sim/clock.zig`, `sim/network.zig`: plan 004 item 2 (landed)
-//!   - `sim/crash_store.zig`, `sim/invariants.zig`, `sim/linearizability.zig`,
+//!   - `sim/invariants.zig`: plan 004 item 3 (landed)
+//!   - `sim/crash_store.zig`, `sim/linearizability.zig`,
 //!     `sim/workload.zig`, `sim/simulation.zig`: planned
 //!
 //! Status: partial. Public declarations are added as plan 004 items land.
@@ -13,9 +14,11 @@ const std = @import("std");
 pub const prng = @import("sim/prng.zig");
 pub const clock = @import("sim/clock.zig");
 pub const network = @import("sim/network.zig");
+pub const invariants = @import("sim/invariants.zig");
 pub const Prng = prng.Prng;
 pub const VirtualClock = clock.VirtualClock;
 pub const Network = network.Network;
+pub const Checker = invariants.Checker;
 
 /// Module-level error set. Extend as functionality lands; keep names descriptive
 /// (`error.ChecksumMismatch`, not `error.Invalid`).
@@ -33,4 +36,7 @@ test {
     _ = @import("sim/clock_test.zig");
     _ = @import("sim/network_test.zig");
     _ = @import("sim/network_model_test.zig");
+    // Plan 004 item 3: the invariant checker.
+    _ = @import("sim/invariants_test.zig");
+    _ = @import("sim/invariants_model_test.zig");
 }
