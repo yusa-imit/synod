@@ -70,6 +70,37 @@ pub fn members_capacity(config: *const Config) u32 {
     return result;
 }
 
+/// Most bytes `gpa.alloc(T, count)` takes from a `FixedBufferAllocator`: the array plus up to
+/// `@alignOf(T) - 1` bytes of padding to reach its alignment.
+pub fn alloc_bytes_max(comptime T: type, count: u64) u64 {
+    assert(@sizeOf(T) > 0);
+    const array_bytes = count * @sizeOf(T);
+    const result = array_bytes + @alignOf(T) - 1;
+    assert(result >= array_bytes);
+    return result;
+}
+
+/// An upper bound on everything `Node.init` allocates for `config`, one term per allocation
+/// (log slots, entry-byte arena, members, votes, effects, `Progress` slots, round records),
+/// each with its alignment padding. Pure; the sum is what a `FixedBufferAllocator` needs.
+pub fn init_bytes_max(config: *const Config) u64 {
+    assert(config.voters_max >= 1); // Sizes only: the id is not an input, so `.none` is fine.
+    assert(config.voters_max <= types.voters_max);
+    assert(config.learners_max <= types.learners_max);
+    assert(config.inflight_max > 0);
+    assert(config.log_entries_max > 0);
+    const result = alloc_bytes_max(Entry, config.log_entries_max) +
+        alloc_bytes_max(u8, config.log_bytes_max) +
+        alloc_bytes_max(NodeId, members_capacity(config)) +
+        alloc_bytes_max(NodeId, votes_capacity(config)) +
+        alloc_bytes_max(Effect, effects_capacity(config)) +
+        alloc_bytes_max(Progress, progress_capacity(config)) +
+        alloc_bytes_max(leader_module.Round, rounds_capacity(config));
+    assert(result >= config.log_bytes_max);
+    assert(result >= @as(u64, config.log_entries_max) * @sizeOf(Entry));
+    return result;
+}
+
 /// `t + rng.uint_less_than(t)`: exactly one draw, a value in `[t, 2t)`.
 pub fn election_timeout_draw(rng: Rng, election_ticks: u32) u32 {
     assert(election_ticks > 0);
@@ -224,16 +255,20 @@ const std = @import("std");
 const assert = std.debug.assert;
 const election = @import("election.zig");
 const interfaces = @import("../interfaces.zig");
+const leader_module = @import("leader.zig");
 const node_module = @import("node.zig");
 const types = @import("../types.zig");
 
 const Config = node_module.Config;
 const Configuration = types.Configuration;
+const Effect = node_module.Effect;
+const Entry = types.Entry;
 const EntryKind = types.EntryKind;
 const InitError = node_module.InitError;
 const InvariantError = node_module.InvariantError;
 const Node = node_module.Node;
 const NodeId = types.NodeId;
+const Progress = @import("progress.zig").Progress;
 const Restore = node_module.Restore;
 const Rng = interfaces.Rng;
 const Term = types.Term;

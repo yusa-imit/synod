@@ -7,6 +7,11 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- `src/sim/simulation.zig` (plan 004 item 4): `Simulation` event loop over N `Driver`s,
+  `MemoryStore`s, the seeded `Network` and the virtual clock; `step` runs one delivery or tick,
+  then every `check_invariants()` and the invariants `Checker`; `run_until` stops at
+  `events_max` with `error.EventsExhausted`; `Report` carries the seed; `run_seed`.
+  `Node.init_bytes_max` and `Driver.init_bytes_max` give the exact init allocation bound.
 - `src/sim/invariants.zig` (plan 004 item 3): `Checker` with five safety properties (election
   safety, leader append-only, log matching, leader completeness, state machine safety), driven
   by `Observation`s and applied records, blind to `Node` internals; latches the first
