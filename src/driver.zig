@@ -108,6 +108,19 @@ pub const Driver = struct {
         assert(!driver.stopped);
     }
 
+    /// An upper bound, in bytes, on everything `init` allocates for `config`: the node's
+    /// allocations plus the restore scratch slice, alignment slack included (ADR-008).
+    /// The scratch slice (`log_entries_max` entries) is live while the node allocates, so the
+    /// two add up. Precondition: a coherent `config`.
+    pub fn init_bytes_max(config: *const raft.Config) u64 {
+        const node_bytes = raft.Node.init_bytes_max(config);
+        const scratch_bytes = @as(u64, config.log_entries_max) * @sizeOf(types.Entry) +
+            @alignOf(types.Entry) - 1;
+        assert(node_bytes > 0);
+        assert(scratch_bytes >= config.log_entries_max);
+        return node_bytes + scratch_bytes;
+    }
+
     pub fn deinit(driver: *Driver, io: Io, gpa: Allocator) void {
         _ = io;
         driver.node.deinit(gpa);
@@ -213,4 +226,5 @@ test "driver: module compiles" {
 
 test {
     _ = @import("driver_test.zig");
+    _ = @import("driver_init_bytes_test.zig");
 }

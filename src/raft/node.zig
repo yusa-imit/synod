@@ -258,6 +258,15 @@ pub const Node = struct {
         assert(node.log.count == restore.entries.len);
     }
 
+    /// An upper bound, in bytes, on everything `init` allocates for `config`, alignment slack
+    /// included: a `FixedBufferAllocator` of this size satisfies `init` (ADR-008).
+    pub fn init_bytes_max(config: *const Config) u64 {
+        const bytes = node_init.init_bytes_max(config);
+        assert(bytes >= config.log_bytes_max);
+        assert(bytes > 0);
+        return bytes;
+    }
+
     /// Frees what `init` allocated, with the same `gpa`. Precondition: initialized, not yet
     /// deinitialized. Every borrowed `Effects` view and `entries()` slice dies here.
     pub fn deinit(node: *Node, gpa: Allocator) void {

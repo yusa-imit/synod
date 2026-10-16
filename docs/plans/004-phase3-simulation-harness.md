@@ -37,7 +37,7 @@ it into the public `sim` module (PRD §4.5) instead of growing a second harness.
       imports it in the same PR so no duplicate outlives a cycle. *Failing test first:* per
       property, a hand-built history that passes and one that fails with the named error.
       `blocked_by: none`
-- [ ] 4. **3A-ii `sim/simulation.zig` — event loop.** `init(gpa, io, options)` builds N drivers
+- [x] 4. **3A-ii `sim/simulation.zig` — event loop.** `init(gpa, io, options)` builds N drivers
       over `MemoryStore`, a network-backed `Transport`, the virtual `Clock`, a recording
       `StateMachine`; `step` runs one event (delivery or clock advance + `poll`), then every
       node's `check_invariants()` and item 3's checker; `run_until(ms)` stops at `events_max`

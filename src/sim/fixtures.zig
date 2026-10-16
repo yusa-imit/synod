@@ -1,6 +1,8 @@
-//! Test fixtures for `sim/network.zig`: the single construction path for a test `Network`
-//! (`Rig`), message builders, an owned message description (`Spec`) the model tests replay
-//! against a reference, and a drain helper. Test support only; nothing here is public API.
+//! Test fixtures for `sim/network.zig` and `sim/simulation.zig`: the single construction path
+//! for a test `Network` (`Rig`), message builders, an owned message description (`Spec`) the
+//! model tests replay against a reference, a drain helper, and the `Simulation` helpers (the
+//! options builder, leader and commit queries, the scripted-proposal loop). Test support only;
+//! nothing here is public API.
 //!
 //! Allocation: only through the `gpa` the caller passes to `Rig.init`/`Rig.deinit`.
 
@@ -11,6 +13,7 @@ const types = @import("../types.zig");
 const clock_module = @import("clock.zig");
 const network_module = @import("network.zig");
 const prng_module = @import("prng.zig");
+const simulation_module = @import("simulation.zig");
 
 const Entry = types.Entry;
 const Header = types.Header;
@@ -227,4 +230,111 @@ pub fn drain(rig: *Rig, out: []Seen) error{TestUnexpectedResult}![]const Seen {
     }
     assert(count <= out.len);
     return out[0..count];
+}
+
+// ---- Simulation helpers ---------------------------------------------------------------------
+
+pub const Simulation = simulation_module.Simulation;
+pub const SimOptions = simulation_module.Options;
+
+/// `Options.quiet` with the test-sized limits (the preset already is one); the one place a
+/// test starts from, so a preset change lands here.
+pub fn sim_quiet(seed: u64, nodes_count: u8) SimOptions {
+    const options = SimOptions.quiet(seed, nodes_count);
+    assert(options.plant == .none);
+    assert(options.nodes_count == nodes_count);
+    return options;
+}
+
+/// The node slots among `members` whose role is leader right now.
+pub fn leaders_among(simulation: *const Simulation, members: []const u8) u32 {
+    var count: u32 = 0;
+    for (members) |slot| {
+        const status = simulation.status(slot) orelse continue;
+        if (status.role == .leader) count += 1;
+    }
+    return count;
+}
+
+/// The first slot among `members` that leads right now, if any.
+pub fn leader_among(simulation: *const Simulation, members: []const u8) ?u8 {
+    for (members) |slot| {
+        const status = simulation.status(slot) orelse continue;
+        if (status.role == .leader) return slot;
+    }
+    return null;
+}
+
+/// The highest commit index any of the first `nodes_count` nodes reports.
+pub fn commit_max(simulation: *const Simulation, nodes_count: u8) u64 {
+    var most: u64 = 0;
+    for (0..nodes_count) |slot| {
+        const status = simulation.status(@intCast(slot)) orelse continue;
+        most = @max(most, @intFromEnum(status.commit_index));
+    }
+    return most;
+}
+
+pub const nodes5 = [_]u8{ 0, 1, 2, 3, 4 };
+pub const minority = [_]u8{ 0, 1 };
+pub const majority = [_]u8{ 2, 3, 4 };
+
+/// Proposes `data` to the first leader among `members`; the index it will occupy.
+/// Fails with `error.TestUnexpectedResult` if none leads.
+pub fn propose_to_leader(
+    io: std.Io,
+    simulation: *Simulation,
+    members: []const u8,
+    data: []const u8,
+) !u64 {
+    const slot = leader_among(simulation, members) orelse return error.TestUnexpectedResult;
+    try simulation.propose(io, slot, data);
+    const status = simulation.status(slot) orelse return error.TestUnexpectedResult;
+    return @intFromEnum(status.last_index);
+}
+
+/// Steps one event at a time until the clock reaches `time_ms`, running every property check
+/// after each event. Bounded by `steps_limit`; running out is `error.TestUnexpectedResult`.
+pub fn step_checked(
+    io: std.Io,
+    simulation: *Simulation,
+    time_ms: u64,
+    steps_limit: u32,
+) !void {
+    var steps: u32 = 0;
+    while (simulation.virtual_clock.time_ms < time_ms) {
+        steps += 1;
+        if (steps > steps_limit) return error.TestUnexpectedResult;
+        try simulation.step(io);
+        try check_all(simulation);
+    }
+}
+
+/// All five properties hold right now.
+pub fn check_all(simulation: *Simulation) !void {
+    try simulation.check(.election_safety);
+    try simulation.check(.leader_append_only);
+    try simulation.check(.log_matching);
+    try simulation.check(.leader_completeness);
+    try simulation.check(.state_machine_safety);
+}
+
+/// Every slot below `count` except `slot`, written into `out` (the other side of a cut).
+pub fn others_of(out: *[7]u8, count: u8, slot: u8) []const u8 {
+    assert(count <= out.len);
+    assert(slot < count);
+    var len: usize = 0;
+    for (0..count) |other| {
+        if (other == slot) continue;
+        out[len] = @intCast(other);
+        len += 1;
+    }
+    return out[0..len];
+}
+
+/// Cuts node `slot` off from the other `count - 1` nodes, both directions.
+pub fn isolate(simulation: *Simulation, count: u8, slot: u8) void {
+    var storage: [7]u8 = undefined;
+    const rest = others_of(&storage, count, slot);
+    simulation.network.set_partition(&.{slot}, rest);
 }

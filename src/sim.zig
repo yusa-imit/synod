@@ -4,8 +4,8 @@
 //! Files (see docs/adr/0008-simulator-contract.md and docs/plans/004-phase3-simulation-harness.md):
 //!   - `sim/prng.zig`, `sim/clock.zig`, `sim/network.zig`: plan 004 item 2 (landed)
 //!   - `sim/invariants.zig`: plan 004 item 3 (landed)
-//!   - `sim/crash_store.zig`, `sim/linearizability.zig`,
-//!     `sim/workload.zig`, `sim/simulation.zig`: planned
+//!   - `sim/simulation.zig`: plan 004 item 4 (event loop; landed)
+//!   - `sim/crash_store.zig`, `sim/linearizability.zig`, `sim/workload.zig`: planned
 //!
 //! Status: partial. Public declarations are added as plan 004 items land.
 
@@ -15,16 +15,20 @@ pub const prng = @import("sim/prng.zig");
 pub const clock = @import("sim/clock.zig");
 pub const network = @import("sim/network.zig");
 pub const invariants = @import("sim/invariants.zig");
+pub const simulation = @import("sim/simulation.zig");
 pub const Prng = prng.Prng;
 pub const VirtualClock = clock.VirtualClock;
 pub const Network = network.Network;
 pub const Checker = invariants.Checker;
+pub const Simulation = simulation.Simulation;
+pub const Options = simulation.Options;
+pub const Report = simulation.Report;
+pub const Stats = simulation.Stats;
+pub const Plant = simulation.Plant;
+pub const run_seed = simulation.run_seed;
 
-/// Module-level error set. Extend as functionality lands; keep names descriptive
-/// (`error.ChecksumMismatch`, not `error.Invalid`).
-pub const Error = error{
-    NotImplemented,
-};
+/// Everything a simulation run can return: safety violations, harness limits, node errors.
+pub const Error = simulation.Error;
 
 test "sim: module compiles" {
     std.testing.refAllDecls(@This());
@@ -39,4 +43,7 @@ test {
     // Plan 004 item 3: the invariant checker.
     _ = @import("sim/invariants_test.zig");
     _ = @import("sim/invariants_model_test.zig");
+    // Plan 004 item 4: the event loop.
+    _ = @import("sim/simulation_test.zig");
+    _ = @import("sim/simulation_model_test.zig");
 }
