@@ -44,7 +44,7 @@ it into the public `sim` module (PRD §4.5) instead of growing a second harness.
       with a typed error, never loops unbounded. *Failing test first:* PRD §4.5's scenario
       (5 nodes, `{0,1}`/`{2,3,4}`, 10 s) elects in the majority and commits; the minority never
       commits. `blocked_by: none`
-- [ ] 5. **3A-iii Crash and restart.** Sim-only crash store: writes since the last `sync` vanish
+- [x] 5. **3A-iii Crash and restart.** Sim-only crash store: writes since the last `sync` vanish
       on crash; restart is a fresh `Driver.init` over the same store (ADR-006). Why: no harness
       yet tests persist-before-send, the rule a double vote breaks. *Failing test first:* a
       planted store that loses a *synced* `save_hard_state` makes a seed fail `ElectionSafety`
