@@ -172,6 +172,8 @@ pub const Stats = struct {
     applied: u64,
     crashes: u32,
     torn_crashes: u32,
+    /// Crashes that dropped at least one unsynced write (the ones that can break persistence).
+    lossy_crashes: u32,
     restarts: u32,
     network: Network.Stats,
     /// A hash of the network trace, the event count, the clock, every applied entry's
@@ -222,6 +224,7 @@ pub const Simulation = struct {
     fault_next_ms: u64,
     crashes: u32,
     torn_crashes: u32,
+    lossy_crashes: u32,
     restarts: u32,
 
     /// In place: the simulation must not move afterwards. Builds the cluster from `options`
@@ -247,9 +250,12 @@ pub const Simulation = struct {
         simulation.failed = null;
         simulation.crashes = 0;
         simulation.torn_crashes = 0;
+        simulation.lossy_crashes = 0;
         simulation.restarts = 0;
         simulation.faults_prng = Prng.init(prng_module.derive_seed(options.seed, .faults, 0));
         simulation.fault_next_ms = std.math.maxInt(u64);
+        assert(options.faults.crash_percent <= 100);
+        assert(options.faults.torn_percent <= 100);
         if (options.faults.fault_interval_ms_max > 0) {
             assert(options.faults.down_ms_max > 0);
             const interval_ms_max: u64 = options.faults.fault_interval_ms_max;
@@ -407,6 +413,7 @@ pub const Simulation = struct {
             .applied = simulation.applied_total,
             .crashes = simulation.crashes,
             .torn_crashes = simulation.torn_crashes,
+            .lossy_crashes = simulation.lossy_crashes,
             .restarts = simulation.restarts,
             .network = simulation.network.stats(),
             .digest = simulation.digest(),
@@ -530,11 +537,11 @@ pub const Simulation = struct {
         assert(!sim_node.down);
         assert(keep <= sim_node.store.unsynced_count());
         sim_node.driver.deinit(io, sim_node.fba.allocator());
+        if (keep < sim_node.store.unsynced_count()) simulation.lossy_crashes += 1;
         sim_node.store.crash(keep);
         sim_node.down = true;
         sim_node.torn_pending = false;
         sim_node.restart_at_ms = null;
-        sim_node.recorder.len = 0; // The state machine is volatile.
         simulation.crashes += 1;
         if (torn) simulation.torn_crashes += 1;
     }
@@ -555,6 +562,7 @@ pub const Simulation = struct {
         assert(sim_node.down);
         assert(sim_node.store.unsynced_count() == 0);
         sim_node.fba.reset();
+        sim_node.recorder.len = 0; // The state machine is volatile: undrained applies are void.
         var config = simulation.options.raft;
         config.id = @enumFromInt(@as(u64, slot) + 1);
         sim_node.restart_at_ms = null;

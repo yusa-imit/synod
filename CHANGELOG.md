@@ -7,6 +7,13 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- `src/sim/crash_store.zig`, `src/sim/sim_node.zig` (plan 004 item 5): sim-only crash store over
+  `MemoryStore` (writes since the last `sync` vanish on a torn crash; planted
+  `lose_synced_hard_state` fault) and a per-node crash/restart wrapper; `Simulation` crashes
+  nodes on a seeded schedule and restarts them through a fresh `Driver.init` over the same
+  store. A planted lost synced vote breaks `ElectionSafety` with its seed in the `Report`;
+  the honest store passes 200 crash-heavy seeds.
+
 - `src/sim/simulation.zig` (plan 004 item 4): `Simulation` event loop over N `Driver`s,
   `MemoryStore`s, the seeded `Network` and the virtual clock; `step` runs one delivery or tick,
   then every `check_invariants()` and the invariants `Checker`; `run_until` stops at

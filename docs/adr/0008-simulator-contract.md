@@ -372,3 +372,15 @@ all); `std.Random` (unpinned across releases); a stored `io`; crashes only betwe
 - Phase 4 adds snapshot slots to `Network`, snapshot ops to `CrashStore.crash`, and
   conf-change and ReadIndex events: additive fields and variants, breaking only exhaustive
   switches (MINOR at 0.x).
+
+## Amendments
+
+- **Item 5 (crash and restart).** The event order within one virtual millisecond is
+  `deliver < tick < restart < fault`, not the order above; a restart scheduled for time `t`
+  runs before the fault draw of the same `t`. The journal is sized by `log_bytes_max` and an
+  entry-slot bound (`log_entries_max`), not `entries_max * entry_bytes_max`. `Stats` gains
+  `lossy_crashes` (crashes that dropped at least one unsynced write), the counter behind the
+  "torn crashes that lost a write" vacuity floor. A restart that a planted store makes
+  `RestoreInconsistent` leaves the node down for good (the node refuses to start on corrupt
+  state); an honest store returning it is a bug. Scripted `crash` keeps zero unsynced writes
+  (nothing is unsynced between events); only seeded torn crashes lose data.
