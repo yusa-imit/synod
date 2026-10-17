@@ -31,21 +31,23 @@ const Io = std.Io;
 const driver_module = @import("../driver.zig");
 const interfaces = @import("../interfaces.zig");
 const raft = @import("../raft.zig");
-const store_module = @import("../store.zig");
 const types = @import("../types.zig");
 const clock_module = @import("clock.zig");
+const crash_store_module = @import("crash_store.zig");
 const invariants = @import("invariants.zig");
 const network_module = @import("network.zig");
 const prng_module = @import("prng.zig");
+const sim_node_module = @import("sim_node.zig");
 
 const Checker = invariants.Checker;
+const CrashStore = crash_store_module.CrashStore;
 const Driver = driver_module.Driver;
-const Entry = types.Entry;
-const Index = types.Index;
-const MemoryStore = store_module.MemoryStore;
 const Network = network_module.Network;
 const NodeId = types.NodeId;
 const Prng = prng_module.Prng;
+const Recorder = sim_node_module.Recorder;
+const Applied = sim_node_module.Applied;
+const SimNode = sim_node_module.SimNode;
 const VirtualClock = clock_module.VirtualClock;
 
 /// The most nodes a simulation has; equal to the network's matrix size.
@@ -54,13 +56,44 @@ pub const nodes_max: u8 = 7;
 /// Ticks one `Driver.poll` may run; a tick event polls every `tick_ms`, so one is enough.
 const ticks_per_poll_max: u32 = 2;
 
+/// Unsynced ops a node's `CrashStore` journal holds; a step makes at most three.
+const journal_ops_max: u32 = 8;
+
+/// A torn crash's armed failure fires on one of the next `[0, torn_calls_until_max)` calls.
+const torn_calls_until_max: u64 = 2;
+
 comptime {
     assert(nodes_max <= types.voters_max);
 }
 
 /// A fault the harness plants to prove the checkers bite. Item 5 adds
 /// `lose_synced_hard_state`, item 10 `ack_uncommitted` (additive variants).
-pub const Plant = enum(u8) { none = 1, forge_votes = 2, flip_data = 3 };
+pub const Plant = enum(u8) {
+    none = 1,
+    forge_votes = 2,
+    flip_data = 3,
+    lose_synced_hard_state = 4,
+};
+
+/// Seeded fault draws (ADR-008 `Faults`, the crash subset of item 5; item 6 adds the partition
+/// fields). Every `quiet` preset has all four at zero: no fault event ever fires.
+pub const Faults = struct {
+    /// A fault draw happens every `[1, fault_interval_ms_max]` ms; 0 disables fault draws.
+    fault_interval_ms_max: u32,
+    /// Percent of fault draws that crash a seeded up node (the rest do nothing yet).
+    crash_percent: u8,
+    /// Percent of crashes that are torn (`arm_failure` on the node's store).
+    torn_percent: u8,
+    /// A crashed node restarts `[1, down_ms_max]` ms later.
+    down_ms_max: u32,
+
+    pub const none: Faults = .{
+        .fault_interval_ms_max = 0,
+        .crash_percent = 0,
+        .torn_percent = 0,
+        .down_ms_max = 0,
+    };
+};
 
 /// Item 4 carries only what it implements; items 5 and 10 add `faults`, `workload`,
 /// `history_ops_max` and `search_steps_max`, set by `quiet` and `sweep` (additive fields).
@@ -72,6 +105,7 @@ pub const Options = struct {
     /// `id == .none` (asserted); node slot `i` gets id `i + 1`.
     raft: raft.Config,
     network: Network.Model,
+    faults: Faults,
     /// Events a simulation may run before `EventsExhausted`.
     events_max: u64,
     /// Terms the checker tracks before `TermsExhausted`.
@@ -111,6 +145,7 @@ pub const Options = struct {
                 .loss_percent = 0,
                 .duplicate_percent = 0,
             },
+            .faults = Faults.none,
             .events_max = 200_000,
             .terms_max = 256,
             .plant = .none,
@@ -135,6 +170,9 @@ pub const Stats = struct {
     leader_terms: u32,
     committed_max: u64,
     applied: u64,
+    crashes: u32,
+    torn_crashes: u32,
+    restarts: u32,
     network: Network.Stats,
     /// A hash of the network trace, the event count, the clock, every applied entry's
     /// fingerprint in apply order, and every node's final status (amends ADR-008: the log
@@ -148,76 +186,21 @@ pub const LimitError = error{ EventsExhausted, TermsExhausted };
 /// Everything a node, its store or its state machine can report through a `Driver`.
 pub const NodeError = raft.InvariantError || raft.InitError || raft.ReceiveError ||
     raft.ProposeError || Network.InvariantError || interfaces.LogStore.WriteError ||
-    interfaces.LogStore.ReadError || interfaces.StateMachine.ApplyError;
+    interfaces.LogStore.ReadError || interfaces.StateMachine.ApplyError ||
+    CrashStore.InvariantError;
 
 pub const Error = invariants.Violation || LimitError || NodeError;
 
 /// Where a run stopped; `seed` alone replays it.
 pub const Report = struct { seed: u64, event_index: u64, violation: Error };
 
-/// One applied entry as the recorder saw it.
-const Applied = struct { index: Index, entry_fingerprint: u64 };
-
-/// The simulation's `StateMachine`: it records `(index, fingerprint)` of every applied entry,
-/// to be drained into the `Checker` after the event. Fixed capacity, never grows.
-const Recorder = struct {
-    records: []Applied,
-    len: u32,
-
-    pub fn apply(recorder: *Recorder, entry: *const Entry) interfaces.StateMachine.ApplyError!void {
-        assert(recorder.len <= recorder.records.len);
-        assert(entry.index != Index.zero);
-        if (recorder.len == recorder.records.len) return error.StateMachineFailed;
-        recorder.records[recorder.len] = .{
-            .index = entry.index,
-            .entry_fingerprint = invariants.fingerprint(entry),
-        };
-        recorder.len += 1;
-    }
-
-    /// Phase 3 takes no snapshots (ADR-008); a call is a harness fault.
-    pub fn snapshot(
-        recorder: *Recorder,
-        writer: *Io.Writer,
-    ) interfaces.StateMachine.SnapshotError!void {
-        assert(recorder.len <= recorder.records.len);
-        assert(writer.end <= writer.buffer.len);
-        return error.StateMachineFailed;
-    }
-
-    /// Phase 3 restores no snapshots (ADR-008); a call is a harness fault.
-    pub fn restore(
-        recorder: *Recorder,
-        reader: *Io.Reader,
-    ) interfaces.StateMachine.RestoreError!void {
-        assert(recorder.len <= recorder.records.len);
-        assert(reader.seek <= reader.end);
-        return error.StateMachineFailed;
-    }
+/// What the next event is and when it happens. At equal times the order is the declaration
+/// order: `deliver < tick < restart < fault`. `slot` is the node of a `restart`.
+const Event = struct {
+    kind: enum(u8) { deliver, tick, restart, fault },
+    time_ms: u64,
+    slot: u8,
 };
-
-/// One node's world: its store, recorder, PRNG, memory and driver.
-const SimNode = struct {
-    store: MemoryStore,
-    recorder: Recorder,
-    prng: Prng,
-    buffer: []align(16) u8,
-    fba: std.heap.FixedBufferAllocator,
-    driver: Driver,
-
-    fn deinit(sim_node: *SimNode, io: Io, gpa: Allocator) void {
-        assert(sim_node.buffer.len > 0);
-        assert(sim_node.recorder.records.len > 0);
-        sim_node.driver.deinit(io, sim_node.fba.allocator());
-        gpa.free(sim_node.recorder.records);
-        sim_node.store.deinit(gpa);
-        gpa.free(sim_node.buffer);
-        sim_node.* = undefined;
-    }
-};
-
-/// What the next event is and when it happens.
-const Event = struct { kind: enum { deliver, tick }, time_ms: u64 };
 
 pub const Simulation = struct {
     /// Public for scripted partitions (PRD §4.5).
@@ -233,6 +216,13 @@ pub const Simulation = struct {
     applied_total: u64,
     applied_digest: u64,
     failed: ?Error,
+    /// The seeded fault stream (`derive_seed(.faults)`), drawn only by fault events.
+    faults_prng: Prng,
+    /// Virtual time of the next fault draw; `maxInt(u64)` when faults are off.
+    fault_next_ms: u64,
+    crashes: u32,
+    torn_crashes: u32,
+    restarts: u32,
 
     /// In place: the simulation must not move afterwards. Builds the cluster from `options`
     /// (ADR-008 argument order: `io` then `gpa`). On error nothing is left allocated.
@@ -255,6 +245,16 @@ pub const Simulation = struct {
         simulation.applied_total = 0;
         simulation.applied_digest = 0;
         simulation.failed = null;
+        simulation.crashes = 0;
+        simulation.torn_crashes = 0;
+        simulation.restarts = 0;
+        simulation.faults_prng = Prng.init(prng_module.derive_seed(options.seed, .faults, 0));
+        simulation.fault_next_ms = std.math.maxInt(u64);
+        if (options.faults.fault_interval_ms_max > 0) {
+            assert(options.faults.down_ms_max > 0);
+            const interval_ms_max: u64 = options.faults.fault_interval_ms_max;
+            simulation.fault_next_ms = 1 + simulation.faults_prng.uint_less_than(interval_ms_max);
+        }
 
         const network_options: Network.Options = .{
             .nodes_count = options.nodes_count,
@@ -301,7 +301,7 @@ pub const Simulation = struct {
     /// step latched a violation.
     pub fn step(simulation: *Simulation, io: Io) Error!void {
         assert(simulation.events <= simulation.options.events_max);
-        if (simulation.failed) |failure| assert(failure == error.EventsExhausted);
+        simulation.failed_allowed();
         if (simulation.events == simulation.options.events_max) {
             return simulation.latch(error.EventsExhausted);
         }
@@ -314,7 +314,8 @@ pub const Simulation = struct {
     /// Precondition: `time_ms` is not before `virtual_clock.time_ms`.
     pub fn run_until(simulation: *Simulation, io: Io, time_ms: u64) Error!void {
         assert(time_ms >= simulation.virtual_clock.time_ms);
-        if (simulation.failed) |failure| assert(failure == error.EventsExhausted);
+        simulation.failed_allowed();
+        if (simulation.failed) |failure| return failure; // Only `EventsExhausted`, latched.
         // Each pass runs one event or returns, and `step` refuses past `events_max`.
         for (0..simulation.options.events_max + 1) |_| {
             const event = simulation.event_next();
@@ -341,10 +342,13 @@ pub const Simulation = struct {
         data: []const u8,
     ) Error!void {
         assert(node_index < simulation.options.nodes_count);
-        assert(simulation.failed == null);
+        assert(!simulation.nodes[node_index].down);
+        simulation.failed_allowed();
         simulation.nodes[node_index].driver.propose(io, data) catch |err| switch (err) {
             error.ProposeNotLeader, error.ProposeTooLarge, error.ProposeLogFull => return err,
-            else => return simulation.latch(err),
+            else => simulation.node_fault(io, node_index, err) catch |fault| {
+                return simulation.latch(fault);
+            },
         };
         simulation.check_after() catch |err| return simulation.latch(err);
     }
@@ -363,11 +367,34 @@ pub const Simulation = struct {
         }
     }
 
-    /// Null when the node is down (item 5); always non-null in item 4.
+    /// Scripted clean crash of node `node_index` (not an event): the driver is dropped and the
+    /// store keeps every unsynced op (none, between events). It stays down until `restart`.
+    /// Precondition: the node is up.
+    pub fn crash(simulation: *Simulation, io: Io, node_index: u8) void {
+        assert(node_index < simulation.options.nodes_count);
+        assert(!simulation.nodes[node_index].down);
+        const sim_node = &simulation.nodes[node_index];
+        simulation.node_down(io, node_index, sim_node.store.unsynced_count(), false);
+        assert(sim_node.restart_at_ms == null);
+    }
+
+    /// Restarts a crashed node (not an event): a fresh `Driver.init` over the same store and
+    /// the node's reset memory; the `Checker` forgets its volatile state. Precondition: the
+    /// node is down.
+    pub fn restart(simulation: *Simulation, io: Io, node_index: u8) Error!void {
+        assert(node_index < simulation.options.nodes_count);
+        assert(simulation.nodes[node_index].down);
+        simulation.node_restart(io, node_index) catch |err| return simulation.latch(err);
+        assert(simulation.nodes[node_index].restart_at_ms == null);
+    }
+
+    /// Null when the node is down.
     pub fn status(simulation: *const Simulation, node_index: u8) ?raft.Status {
         assert(node_index < simulation.options.nodes_count);
         assert(simulation.options.nodes_count <= nodes_max);
-        return simulation.nodes[node_index].driver.node.status();
+        const sim_node = &simulation.nodes[node_index];
+        if (sim_node.down) return null;
+        return sim_node.driver.node.status();
     }
 
     pub fn stats(simulation: *const Simulation) Stats {
@@ -378,6 +405,9 @@ pub const Simulation = struct {
             .leader_terms = checker_stats.leader_terms,
             .committed_max = checker_stats.committed_max,
             .applied = simulation.applied_total,
+            .crashes = simulation.crashes,
+            .torn_crashes = simulation.torn_crashes,
+            .restarts = simulation.restarts,
             .network = simulation.network.stats(),
             .digest = simulation.digest(),
         };
@@ -397,6 +427,14 @@ pub const Simulation = struct {
         };
     }
 
+    /// Callers may continue only after no failure or a latched `EventsExhausted` (asserted:
+    /// any other latched failure is a caller bug). `EventsExhausted` is simply stepped again.
+    fn failed_allowed(simulation: *const Simulation) void {
+        assert(simulation.events <= simulation.options.events_max);
+        const failure = simulation.failed orelse return;
+        assert(failure == error.EventsExhausted);
+    }
+
     /// Records `err` as the failure of this run and returns it.
     fn latch(simulation: *Simulation, err: Error) Error {
         assert(simulation.events <= simulation.options.events_max);
@@ -404,19 +442,28 @@ pub const Simulation = struct {
         return err;
     }
 
-    /// The earliest event: a delivery due by the next tick, else that tick.
+    /// The earliest event by `(time_ms, kind)`: a delivery due by the next tick, the tick, the
+    /// earliest scheduled restart, the next fault draw.
     fn event_next(simulation: *const Simulation) Event {
-        const tick_ms = simulation.tick_next_ms;
-        assert(tick_ms >= simulation.virtual_clock.time_ms);
+        const now_ms = simulation.virtual_clock.time_ms;
+        var best: Event = .{ .kind = .tick, .time_ms = simulation.tick_next_ms, .slot = 0 };
+        assert(best.time_ms >= now_ms);
         if (simulation.network.next_due_ms()) |due_ms| {
-            if (due_ms <= tick_ms) {
-                return .{
-                    .kind = .deliver,
-                    .time_ms = @max(due_ms, simulation.virtual_clock.time_ms),
-                };
+            if (due_ms <= best.time_ms) {
+                best = .{ .kind = .deliver, .time_ms = @max(due_ms, now_ms), .slot = 0 };
             }
         }
-        return .{ .kind = .tick, .time_ms = tick_ms };
+        for (simulation.nodes[0..simulation.options.nodes_count], 0..) |*sim_node, slot| {
+            const restart_ms = sim_node.restart_at_ms orelse continue;
+            if (restart_ms < best.time_ms) {
+                best = .{ .kind = .restart, .time_ms = restart_ms, .slot = @intCast(slot) };
+            }
+        }
+        if (simulation.fault_next_ms < best.time_ms) {
+            best = .{ .kind = .fault, .time_ms = simulation.fault_next_ms, .slot = 0 };
+        }
+        assert(best.time_ms >= now_ms);
+        return best;
     }
 
     /// Advances the clock to `event`, runs it and checks everything; latches any failure.
@@ -440,14 +487,120 @@ pub const Simulation = struct {
                 assert(target != .none);
                 const slot: u8 = @intCast(@intFromEnum(target) - 1);
                 assert(slot < simulation.options.nodes_count);
-                try simulation.nodes[slot].driver.receive(io, message);
+                if (simulation.nodes[slot].down) return simulation.network.drop_down();
+                simulation.nodes[slot].driver.receive(io, message) catch |err| {
+                    try simulation.node_fault(io, slot, err);
+                };
             },
             .tick => {
                 simulation.tick_next_ms += simulation.options.tick_ms;
-                const nodes = simulation.nodes[0..simulation.options.nodes_count];
-                for (nodes) |*sim_node| try sim_node.driver.poll(io);
+                for (0..simulation.options.nodes_count) |slot| {
+                    if (simulation.nodes[slot].down) continue;
+                    simulation.nodes[slot].driver.poll(io) catch |err| {
+                        try simulation.node_fault(io, @intCast(slot), err);
+                    };
+                }
             },
+            .restart => try simulation.node_restart(io, event.slot),
+            .fault => simulation.fault_draw(io),
         }
+    }
+
+    /// A node returned `err` from its driver. A store failure armed by a torn crash is the
+    /// crash: the node fail-stops, keeping a seeded prefix of its unsynced ops. Anything else
+    /// is returned.
+    fn node_fault(simulation: *Simulation, io: Io, slot: u8, err: Error) Error!void {
+        assert(slot < simulation.options.nodes_count);
+        const sim_node = &simulation.nodes[slot];
+        assert(!sim_node.down);
+        switch (err) {
+            error.StoreIoFailed => {},
+            else => return err,
+        }
+        if (!sim_node.torn_pending) return err;
+        const unsynced: u64 = sim_node.store.unsynced_count();
+        const keep: u32 = @intCast(simulation.faults_prng.uint_less_than(unsynced + 1));
+        simulation.node_down(io, slot, keep, true);
+        simulation.restart_schedule(slot);
+    }
+
+    /// Takes node `slot` down: drops its driver, applies the crash to its store.
+    fn node_down(simulation: *Simulation, io: Io, slot: u8, keep: u32, torn: bool) void {
+        const sim_node = &simulation.nodes[slot];
+        assert(!sim_node.down);
+        assert(keep <= sim_node.store.unsynced_count());
+        sim_node.driver.deinit(io, sim_node.fba.allocator());
+        sim_node.store.crash(keep);
+        sim_node.down = true;
+        sim_node.torn_pending = false;
+        sim_node.restart_at_ms = null;
+        sim_node.recorder.len = 0; // The state machine is volatile.
+        simulation.crashes += 1;
+        if (torn) simulation.torn_crashes += 1;
+    }
+
+    /// Schedules the restart of a seeded crash `[1, down_ms_max]` ms from now.
+    fn restart_schedule(simulation: *Simulation, slot: u8) void {
+        const sim_node = &simulation.nodes[slot];
+        assert(sim_node.down);
+        const down_ms_max: u64 = simulation.options.faults.down_ms_max;
+        assert(down_ms_max > 0);
+        const delay_ms = 1 + simulation.faults_prng.uint_less_than(down_ms_max);
+        sim_node.restart_at_ms = simulation.virtual_clock.time_ms + delay_ms;
+    }
+
+    /// A fresh `Driver.init` over the node's store and reset memory; tells the `Checker`.
+    fn node_restart(simulation: *Simulation, io: Io, slot: u8) Error!void {
+        const sim_node = &simulation.nodes[slot];
+        assert(sim_node.down);
+        assert(sim_node.store.unsynced_count() == 0);
+        sim_node.fba.reset();
+        var config = simulation.options.raft;
+        config.id = @enumFromInt(@as(u64, slot) + 1);
+        sim_node.restart_at_ms = null;
+        simulation.driver_start(io, slot, &config) catch |err| switch (err) {
+            // The planted store reverted a hard state below its own log: the node detects the
+            // corruption and refuses to start, so it stays down for good. An honest store
+            // never does this: that is a bug, returned.
+            error.RestoreInconsistent => {
+                if (simulation.options.plant == .lose_synced_hard_state) return;
+                return err;
+            },
+            else => return err,
+        };
+        sim_node.down = false;
+        simulation.checker.restarted(slot);
+        simulation.restarts += 1;
+    }
+
+    /// One seeded fault draw: with `crash_percent` a seeded up node crashes, torn with
+    /// `torn_percent` (the store's next `arm_failure` call fails and the node goes down then).
+    fn fault_draw(simulation: *Simulation, io: Io) void {
+        const faults = simulation.options.faults;
+        assert(faults.fault_interval_ms_max > 0);
+        const prng = &simulation.faults_prng;
+        const interval_ms = 1 + prng.uint_less_than(faults.fault_interval_ms_max);
+        simulation.fault_next_ms = simulation.virtual_clock.time_ms + interval_ms;
+        if (!prng.chance(faults.crash_percent)) return;
+        var up: [nodes_max]u8 = undefined;
+        var up_count: u8 = 0;
+        for (simulation.nodes[0..simulation.options.nodes_count], 0..) |*sim_node, slot| {
+            if (sim_node.down) continue;
+            up[up_count] = @intCast(slot);
+            up_count += 1;
+        }
+        if (up_count == 0) return;
+        const slot = up[@intCast(prng.uint_less_than(up_count))];
+        const sim_node = &simulation.nodes[slot];
+        if (prng.chance(faults.torn_percent)) {
+            const calls_until: u32 = @intCast(prng.uint_less_than(torn_calls_until_max));
+            if (sim_node.torn_pending) return;
+            sim_node.torn_pending = true;
+            sim_node.store.arm_failure(calls_until);
+            return;
+        }
+        simulation.node_down(io, slot, sim_node.store.unsynced_count(), false);
+        simulation.restart_schedule(slot);
     }
 
     /// The checks after every event: node and network invariants, the `Checker` over all
@@ -455,21 +608,25 @@ pub const Simulation = struct {
     fn check_after(simulation: *Simulation) Error!void {
         const count = simulation.options.nodes_count;
         var observations: [nodes_max]invariants.Observation = undefined;
+        var up_count: u8 = 0;
         for (simulation.nodes[0..count], 0..) |*sim_node, slot| {
+            try sim_node.store.check_invariants();
+            if (sim_node.down) continue;
             try sim_node.driver.node.check_invariants();
-            observations[slot] = .{
+            observations[up_count] = .{
                 .node_index = @intCast(slot),
                 .status = sim_node.driver.node.status(),
                 .log = sim_node.driver.node.entries(),
             };
+            up_count += 1;
         }
         try simulation.network.check_invariants();
-        try simulation.checker.observe(observations[0..count]);
+        try simulation.checker.observe(observations[0..up_count]);
         for (simulation.nodes[0..count], 0..) |*sim_node, slot| {
             try simulation.drain(@intCast(slot), &sim_node.recorder);
         }
         assert(count <= nodes_max);
-        assert(simulation.failed == null);
+        simulation.failed_allowed();
     }
 
     /// Hands the recorded applies of node `slot` to the checker, in apply order.
@@ -500,6 +657,11 @@ pub const Simulation = struct {
         };
         hasher.update(std.mem.asBytes(&head));
         for (simulation.nodes[0..count]) |*sim_node| {
+            if (sim_node.down) {
+                const down_word = [1]u64{std.math.maxInt(u64)};
+                hasher.update(std.mem.asBytes(&down_word));
+                continue;
+            }
             const node_status = sim_node.driver.node.status();
             const words = [7]u64{
                 @intFromEnum(node_status.role),
@@ -528,17 +690,26 @@ pub const Simulation = struct {
         sim_node.buffer = try gpa.alignedAlloc(u8, .@"16", buffer_bytes);
         errdefer gpa.free(sim_node.buffer);
 
-        try sim_node.store.init(gpa, .{
-            .entries_max = config.log_entries_max,
-            .data_bytes_max = config.log_bytes_max,
-            .snapshot_bytes_max = 0,
-        });
+        const store_options: CrashStore.Options = .{
+            .store = .{
+                .entries_max = config.log_entries_max,
+                .data_bytes_max = config.log_bytes_max,
+                .snapshot_bytes_max = 0,
+            },
+            .journal_ops_max = journal_ops_max,
+            .journal_bytes_max = config.log_bytes_max,
+            .fault = store_fault_of(simulation.options.plant),
+        };
+        try sim_node.store.init(gpa, &store_options);
         errdefer sim_node.store.deinit(gpa);
 
         sim_node.recorder.records = try gpa.alloc(Applied, config.log_entries_max);
         errdefer gpa.free(sim_node.recorder.records);
 
         sim_node.recorder.len = 0;
+        sim_node.down = false;
+        sim_node.torn_pending = false;
+        sim_node.restart_at_ms = null;
         sim_node.prng = Prng.init(prng_module.derive_seed(simulation.options.seed, .node, slot));
         sim_node.fba = std.heap.FixedBufferAllocator.init(sim_node.buffer);
         try simulation.driver_start(io, slot, &config);
@@ -564,7 +735,7 @@ pub const Simulation = struct {
             .learners = &.{},
         };
         const deps: Driver.Deps = .{
-            .store = interfaces.LogStore.init(&sim_node.store),
+            .store = sim_node.store.as_log_store(),
             .transport = simulation.network.as_transport(),
             .state_machine = interfaces.StateMachine.init(&sim_node.recorder),
             .clock = simulation.virtual_clock.as_clock(),
@@ -591,6 +762,15 @@ fn fault_of(plant: Plant) Network.Fault {
         .none => .none,
         .forge_votes => .forge_votes,
         .flip_data => .flip_data,
+        .lose_synced_hard_state => .none,
+    };
+}
+
+/// The store fault a `Plant` stands for; the other plants leave the store honest.
+fn store_fault_of(plant: Plant) CrashStore.Fault {
+    return switch (plant) {
+        .none, .forge_votes, .flip_data => .none,
+        .lose_synced_hard_state => .lose_synced_hard_state,
     };
 }
 
