@@ -29,11 +29,20 @@ pub const Config = struct {
     seed_first: u64,
     /// Seeds to run, at least 1.
     seeds_count: u64,
+    /// A fault the sweep plants; `.none` for an honest sweep.
     plant: sim.Plant,
+    /// Virtual milliseconds simulated per seed, at least 1.
     duration_ms: u64,
 };
 
-pub const ParseError = error{ FlagUnknown, ValueInvalid, PlantUnknown, SeedsCountZero };
+pub const ParseError = error{
+    ArgsTooMany,
+    FlagUnknown,
+    PlantUnknown,
+    SeedsCountZero,
+    ValueInvalid,
+    WindowOverflow,
+};
 
 /// Totals over the seeds that passed; also the vacuity evidence printed after a green sweep.
 pub const Summary = struct {
@@ -52,49 +61,56 @@ pub const Outcome = union(enum) {
 };
 
 /// Parses `--seeds=N`, `--seed=S` (one seed), `--seed-start=S`, `--plant=NAME`; `args` excludes
-/// the program name. A flag may appear once, and `--seed` excludes `--seeds`.
+/// the program name. A flag may appear once, `--seed` excludes `--seeds`, and the window must fit
+/// in a `u64`.
 pub fn parse_args(args: []const []const u8) ParseError!Config {
-    assert(args.len <= args_max);
+    if (args.len > flags_count) return error.ArgsTooMany;
     var config: Config = .{
         .seed_first = 0,
         .seeds_count = seeds_count_default,
         .plant = .none,
         .duration_ms = duration_ms_default,
     };
-    var seen: [flags.len]bool = @splat(false);
+    var seen: [flags_count]bool = @splat(false);
     for (args) |arg| {
-        const flag_index = flag_index_of(arg) orelse return error.FlagUnknown;
-        if (seen[flag_index]) return error.ValueInvalid;
-        seen[flag_index] = true;
-        const value = arg[flags[flag_index].len..];
-        switch (flag_index) {
-            0 => config.seeds_count = try parse_u64(value),
-            1 => {
+        const flag = flag_of(arg) orelse return error.FlagUnknown;
+        if (seen[@intFromEnum(flag)]) return error.ValueInvalid;
+        seen[@intFromEnum(flag)] = true;
+        const value = arg[flag_prefixes[@intFromEnum(flag)].len..];
+        switch (flag) {
+            .seeds => config.seeds_count = try parse_u64(value),
+            .seed => {
                 config.seed_first = try parse_u64(value);
                 config.seeds_count = 1;
             },
-            2 => config.seed_first = try parse_u64(value),
-            3 => config.plant = std.meta.stringToEnum(sim.Plant, value) orelse
+            .seed_start => config.seed_first = try parse_u64(value),
+            .plant => config.plant = std.meta.stringToEnum(sim.Plant, value) orelse
                 return error.PlantUnknown,
-            else => unreachable, // proof: `flag_index_of` returns an index below `flags.len`.
         }
     }
-    if (seen[0] and seen[1]) return error.ValueInvalid;
+    if (seen[@intFromEnum(Flag.seeds)] and seen[@intFromEnum(Flag.seed)]) {
+        return error.ValueInvalid;
+    }
     if (config.seeds_count == 0) return error.SeedsCountZero;
+    if (config.seed_first > std.math.maxInt(u64) - config.seeds_count) {
+        return error.WindowOverflow;
+    }
     assert(config.seeds_count > 0);
     assert(config.duration_ms > 0);
     return config;
 }
 
-/// Flag prefixes, in the order `parse_args` switches on; each ends with its `=`.
-const flags = [_][]const u8{ "--seeds=", "--seed=", "--seed-start=", "--plant=" };
+/// The flags; `parse_args` marks each seen by its ordinal.
+const Flag = enum(u8) { seeds, seed, seed_start, plant };
 
-/// Arguments a sweep accepts: one per flag.
-const args_max = flags.len;
+const flags_count = @typeInfo(Flag).@"enum".fields.len;
 
-fn flag_index_of(arg: []const u8) ?usize {
-    for (flags, 0..) |flag, index| {
-        if (std.mem.startsWith(u8, arg, flag)) return index;
+/// Prefix of each flag, indexed by `Flag`; the value follows it.
+const flag_prefixes = [flags_count][]const u8{ "--seeds=", "--seed=", "--seed-start=", "--plant=" };
+
+fn flag_of(arg: []const u8) ?Flag {
+    for (flag_prefixes, 0..) |prefix, index| {
+        if (std.mem.startsWith(u8, arg, prefix)) return @enumFromInt(index);
     }
     return null;
 }
@@ -241,6 +257,13 @@ test "parse_args: every error variant is provoked" {
     try testing.expectError(error.ValueInvalid, parse_args(&.{ "--seed=1", "--seeds=2" }));
     try testing.expectError(error.PlantUnknown, parse_args(&.{"--plant=nope"}));
     try testing.expectError(error.SeedsCountZero, parse_args(&.{"--seeds=0"}));
+    try testing.expectError(error.ArgsTooMany, parse_args(&.{ "a", "b", "c", "d", "e" }));
+    try testing.expectError(error.WindowOverflow, parse_args(&.{
+        "--seed-start=18446744073709551615",
+        "--seeds=2",
+    }));
+    const last = try parse_args(&.{ "--seed-start=18446744073709551614", "--seeds=1" });
+    try testing.expectEqual(std.math.maxInt(u64) - 1, last.seed_first);
 }
 
 test "stress_options: crashes, partitions and proposals are all switched on" {
@@ -311,7 +334,7 @@ test "run_sweep: one window run twice gives the same summary" {
     };
     const first = run_sweep(testing.io, testing.allocator, &config);
     const second = run_sweep(testing.io, testing.allocator, &config);
-    try testing.expectEqual(first.passed, second.passed);
+    try testing.expectEqual(first, second);
 }
 
 test "write_outcome: a green sweep prints the totals" {
