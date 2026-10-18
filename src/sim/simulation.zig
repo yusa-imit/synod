@@ -284,6 +284,7 @@ pub const Simulation = struct {
         assert(options.nodes_count <= nodes_max);
         assert(options.tick_ms > 0);
         assert(options.events_max < std.math.maxInt(u64));
+        try options_validate(options);
 
         simulation.options = options.*;
         simulation.virtual_clock = VirtualClock.init(0);
@@ -298,17 +299,6 @@ pub const Simulation = struct {
         simulation.restarts = 0;
         simulation.faults_prng = Prng.init(prng_module.derive_seed(options.seed, .faults, 0));
         simulation.fault_next_ms = std.math.maxInt(u64);
-        const faults_in = options.faults;
-        if (faults_in.partition_percent > 100) return error.PartitionPercentInvalid;
-        if (faults_in.partition_percent > 0) {
-            if (faults_in.fault_interval_ms_max == 0) return error.FaultIntervalInvalid;
-            if (faults_in.partition_ms_max == 0) return error.PartitionDurationInvalid;
-        }
-        if (options.proposals.interval_ms_max > 0) {
-            const bytes_max = options.raft.message_limits.entry_bytes_max;
-            if (options.proposals.data_bytes == 0) return error.ProposalBytesInvalid;
-            if (options.proposals.data_bytes > bytes_max) return error.ProposalBytesInvalid;
-        }
         simulation.partitions = 0;
         simulation.proposed = 0;
         simulation.cut_slot = null;
@@ -320,8 +310,6 @@ pub const Simulation = struct {
             const im: u64 = options.proposals.interval_ms_max;
             simulation.propose_next_ms = 1 + simulation.workload_prng.uint_less_than(im);
         }
-        assert(options.faults.crash_percent <= 100);
-        assert(options.faults.torn_percent <= 100);
         if (options.faults.fault_interval_ms_max > 0) {
             const interval_ms_max: u64 = options.faults.fault_interval_ms_max;
             simulation.fault_next_ms = 1 + simulation.faults_prng.uint_less_than(interval_ms_max);
@@ -353,6 +341,23 @@ pub const Simulation = struct {
         }
         assert(built == options.nodes_count);
         assert(simulation.events == 0);
+    }
+
+    /// Refuses cut and proposal settings that could never run, before `init` allocates.
+    fn options_validate(options: *const Options) OptionsError!void {
+        const faults = options.faults;
+        assert(faults.crash_percent <= 100);
+        assert(faults.torn_percent <= 100);
+        if (faults.partition_percent > 100) return error.PartitionPercentInvalid;
+        if (faults.partition_percent > 0) {
+            if (faults.fault_interval_ms_max == 0) return error.FaultIntervalInvalid;
+            if (faults.partition_ms_max == 0) return error.PartitionDurationInvalid;
+        }
+        if (options.proposals.interval_ms_max > 0) {
+            const bytes_max = options.raft.message_limits.entry_bytes_max;
+            if (options.proposals.data_bytes == 0) return error.ProposalBytesInvalid;
+            if (options.proposals.data_bytes > bytes_max) return error.ProposalBytesInvalid;
+        }
     }
 
     /// Frees everything `init` allocated, with the same `gpa`.

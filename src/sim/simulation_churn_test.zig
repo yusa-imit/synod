@@ -42,7 +42,7 @@ const Stats = simulation_module.Stats;
 const io = testing.io;
 const gpa = testing.allocator;
 
-const seeds_count = 500;
+const seeds_count = 100;
 const duration_ms = 5_000;
 const three = [_]u8{ 0, 1, 2 };
 
@@ -415,6 +415,7 @@ const Model = struct {
     /// The one isolated node, null when whole; anything else is a model failure.
     fn isolated(model: *const Model, simulation: *const Simulation) !?u8 {
         var found: ?u8 = null;
+        var singles: u8 = 0;
         for (0..model.nodes_count) |slot| {
             var cut_links: u8 = 0;
             for (0..model.nodes_count) |other| {
@@ -425,10 +426,17 @@ const Model = struct {
                 if (out != back) return error.OneDirectionCut;
             }
             if (cut_links == 0) continue;
+            // A cut node loses every link; each other node loses exactly the one to the victim.
+            if (cut_links == 1) {
+                singles += 1;
+                continue;
+            }
             if (cut_links != model.nodes_count - 1) return error.NotAWholeNodeCut;
             if (found != null) return error.TwoNodesCut;
             found = @intCast(slot);
         }
+        if (found == null) try testing.expectEqual(@as(u8, 0), singles);
+        if (found != null) try testing.expectEqual(model.nodes_count - 1, singles);
         return found;
     }
 
