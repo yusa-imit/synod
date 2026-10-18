@@ -7,6 +7,13 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- `src/sim/simulation_churn_test.zig` (plan 004 item 6): `Faults.partition_percent`/
+  `partition_ms_max` (seeded one-node cuts that heal) and `Proposals` (seeded leader proposals)
+  in `Simulation`, new `Stats.truncates`/`partitions`/`proposed`, `OptionsError` refusals at
+  `init`. The 100-seed churn run keeps `cluster_test`'s vacuity floors and planted faults
+  (`forge_votes`, `flip_data`); `src/raft/cluster_test.zig` and its private `Cluster` are
+  deleted. `zig build test` takes about 23 s in Debug, not the planned 10 s; item 11 re-measures.
+
 - `src/sim/crash_store.zig`, `src/sim/sim_node.zig` (plan 004 item 5): sim-only crash store over
   `MemoryStore` (writes since the last `sync` vanish on a torn crash; planted
   `lose_synced_hard_state` fault) and a per-node crash/restart wrapper; `Simulation` crashes

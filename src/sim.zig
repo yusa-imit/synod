@@ -52,4 +52,6 @@ test {
     // Plan 004 item 5: crash store, crash and restart.
     _ = @import("sim/crash_store_test.zig");
     _ = @import("sim/simulation_crash_test.zig");
+    // Plan 004 item 6: churn (seeded partitions, proposals, truncates) retires cluster_test.
+    _ = @import("sim/simulation_churn_test.zig");
 }

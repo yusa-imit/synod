@@ -50,7 +50,7 @@ it into the public `sim` module (PRD §4.5) instead of growing a second harness.
       planted store that loses a *synced* `save_hard_state` makes a seed fail `ElectionSafety`
       with its seed in the `Report`; the honest store passes 200 crash-heavy seeds.
       `blocked_by: none`
-- [ ] 6. **Retire the duplicate harness.** Port `cluster_test`'s scenarios, vacuity floors (≥40%
+- [x] 6. **Retire the duplicate harness.** Port `cluster_test`'s scenarios, vacuity floors (≥40%
       seeds with two leader terms, ≥30% with a truncate) and planted faults (`forge_votes`,
       `flip_data`) onto `Simulation`; delete its `Cluster`. *Failing test first:* the ported
       floor and planted-fault tests run red against item 4's sim before wiring. *Verify:*

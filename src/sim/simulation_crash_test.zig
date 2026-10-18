@@ -234,6 +234,8 @@ fn crashy(seed: u64, plant: Plant) Options {
         .crash_percent = 50,
         .torn_percent = 50,
         .down_ms_max = 400,
+        .partition_percent = 0,
+        .partition_ms_max = 0,
     };
     return options;
 }

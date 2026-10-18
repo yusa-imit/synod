@@ -86,13 +86,33 @@ pub const Faults = struct {
     torn_percent: u8,
     /// A crashed node restarts `[1, down_ms_max]` ms later.
     down_ms_max: u32,
+    /// Percent of fault draws that cut one seeded node off from all the others (both
+    /// directions), unless a cut is already active. At most 100; positive needs
+    /// `fault_interval_ms_max > 0` and `partition_ms_max > 0` (plan 004 item 6).
+    partition_percent: u8,
+    /// A cut heals `[1, partition_ms_max]` ms after it starts.
+    partition_ms_max: u32,
 
     pub const none: Faults = .{
         .fault_interval_ms_max = 0,
         .crash_percent = 0,
         .torn_percent = 0,
         .down_ms_max = 0,
+        .partition_percent = 0,
+        .partition_ms_max = 0,
     };
+};
+
+/// Seeded proposals (plan 004 item 6; item 10's workload supersedes it): every `[1,
+/// interval_ms_max]` ms one node that believes it leads, picked from the `workload` stream,
+/// proposes `data_bytes` bytes.
+pub const Proposals = struct {
+    /// 0 disables proposals.
+    interval_ms_max: u32,
+    /// `[1, raft.message_limits.entry_bytes_max]` when enabled.
+    data_bytes: u8,
+
+    pub const none: Proposals = .{ .interval_ms_max = 0, .data_bytes = 0 };
 };
 
 /// Item 4 carries only what it implements; items 5 and 10 add `faults`, `workload`,
@@ -106,6 +126,7 @@ pub const Options = struct {
     raft: raft.Config,
     network: Network.Model,
     faults: Faults,
+    proposals: Proposals,
     /// Events a simulation may run before `EventsExhausted`.
     events_max: u64,
     /// Terms the checker tracks before `TermsExhausted`.
@@ -146,6 +167,7 @@ pub const Options = struct {
                 .duplicate_percent = 0,
             },
             .faults = Faults.none,
+            .proposals = Proposals.none,
             .events_max = 200_000,
             .terms_max = 256,
             .plant = .none,
@@ -175,6 +197,13 @@ pub const Stats = struct {
     /// Crashes that dropped at least one unsynced write (the ones that can break persistence).
     lossy_crashes: u32,
     restarts: u32,
+    /// Times a node cut a diverged suffix off its log (`CrashStore.truncate` calls).
+    truncates: u64,
+    /// Seeded cuts started.
+    partitions: u32,
+    /// Seeded proposals a leader accepted (`ProposeNotLeader` and `ProposeLogFull` do not
+    /// count).
+    proposed: u64,
     network: Network.Stats,
     /// A hash of the network trace, the event count, the clock, every applied entry's
     /// fingerprint in apply order, and every node's final status (amends ADR-008: the log
@@ -191,7 +220,15 @@ pub const NodeError = raft.InvariantError || raft.InitError || raft.ReceiveError
     interfaces.LogStore.ReadError || interfaces.StateMachine.ApplyError ||
     CrashStore.InvariantError;
 
-pub const Error = invariants.Violation || LimitError || NodeError;
+/// `Options` the simulation refuses at `init`, before it allocates anything.
+pub const OptionsError = error{
+    PartitionPercentInvalid,
+    PartitionDurationInvalid,
+    FaultIntervalInvalid,
+    ProposalBytesInvalid,
+};
+
+pub const Error = invariants.Violation || LimitError || NodeError || OptionsError;
 
 /// Where a run stopped; `seed` alone replays it.
 pub const Report = struct { seed: u64, event_index: u64, violation: Error };
@@ -199,7 +236,7 @@ pub const Report = struct { seed: u64, event_index: u64, violation: Error };
 /// What the next event is and when it happens. At equal times the order is the declaration
 /// order: `deliver < tick < restart < fault`. `slot` is the node of a `restart`.
 const Event = struct {
-    kind: enum(u8) { deliver, tick, restart, fault },
+    kind: enum(u8) { deliver, tick, restart, fault, heal, propose },
     time_ms: u64,
     slot: u8,
 };
@@ -226,6 +263,13 @@ pub const Simulation = struct {
     torn_crashes: u32,
     lossy_crashes: u32,
     restarts: u32,
+    partitions: u32,
+    proposed: u64,
+    cut_slot: ?u8,
+    heal_at_ms: u64,
+    propose_next_ms: u64,
+    workload_prng: Prng,
+    propose_seq: u8,
 
     /// In place: the simulation must not move afterwards. Builds the cluster from `options`
     /// (ADR-008 argument order: `io` then `gpa`). On error nothing is left allocated.
@@ -240,6 +284,7 @@ pub const Simulation = struct {
         assert(options.nodes_count <= nodes_max);
         assert(options.tick_ms > 0);
         assert(options.events_max < std.math.maxInt(u64));
+        try options_validate(options);
 
         simulation.options = options.*;
         simulation.virtual_clock = VirtualClock.init(0);
@@ -254,10 +299,18 @@ pub const Simulation = struct {
         simulation.restarts = 0;
         simulation.faults_prng = Prng.init(prng_module.derive_seed(options.seed, .faults, 0));
         simulation.fault_next_ms = std.math.maxInt(u64);
-        assert(options.faults.crash_percent <= 100);
-        assert(options.faults.torn_percent <= 100);
+        simulation.partitions = 0;
+        simulation.proposed = 0;
+        simulation.cut_slot = null;
+        simulation.heal_at_ms = std.math.maxInt(u64);
+        simulation.propose_seq = 0;
+        simulation.workload_prng = Prng.init(prng_module.derive_seed(options.seed, .workload, 0));
+        simulation.propose_next_ms = std.math.maxInt(u64);
+        if (options.proposals.interval_ms_max > 0) {
+            const im: u64 = options.proposals.interval_ms_max;
+            simulation.propose_next_ms = 1 + simulation.workload_prng.uint_less_than(im);
+        }
         if (options.faults.fault_interval_ms_max > 0) {
-            assert(options.faults.down_ms_max > 0);
             const interval_ms_max: u64 = options.faults.fault_interval_ms_max;
             simulation.fault_next_ms = 1 + simulation.faults_prng.uint_less_than(interval_ms_max);
         }
@@ -288,6 +341,23 @@ pub const Simulation = struct {
         }
         assert(built == options.nodes_count);
         assert(simulation.events == 0);
+    }
+
+    /// Refuses cut and proposal settings that could never run, before `init` allocates.
+    fn options_validate(options: *const Options) OptionsError!void {
+        const faults = options.faults;
+        assert(faults.crash_percent <= 100);
+        assert(faults.torn_percent <= 100);
+        if (faults.partition_percent > 100) return error.PartitionPercentInvalid;
+        if (faults.partition_percent > 0) {
+            if (faults.fault_interval_ms_max == 0) return error.FaultIntervalInvalid;
+            if (faults.partition_ms_max == 0) return error.PartitionDurationInvalid;
+        }
+        if (options.proposals.interval_ms_max > 0) {
+            const bytes_max = options.raft.message_limits.entry_bytes_max;
+            if (options.proposals.data_bytes == 0) return error.ProposalBytesInvalid;
+            if (options.proposals.data_bytes > bytes_max) return error.ProposalBytesInvalid;
+        }
     }
 
     /// Frees everything `init` allocated, with the same `gpa`.
@@ -415,11 +485,20 @@ pub const Simulation = struct {
             .torn_crashes = simulation.torn_crashes,
             .lossy_crashes = simulation.lossy_crashes,
             .restarts = simulation.restarts,
+            .truncates = simulation.truncates_total(),
+            .partitions = simulation.partitions,
+            .proposed = simulation.proposed,
             .network = simulation.network.stats(),
             .digest = simulation.digest(),
         };
         assert(result.events <= simulation.options.events_max);
         return result;
+    }
+
+    fn truncates_total(simulation: *const Simulation) u64 {
+        var total: u64 = 0;
+        for (simulation.nodes[0..simulation.options.nodes_count]) |*n| total += n.store.truncates;
+        return total;
     }
 
     /// Only after a step, `run_until` or `propose` returned a limit or violation error:
@@ -469,6 +548,12 @@ pub const Simulation = struct {
         if (simulation.fault_next_ms < best.time_ms) {
             best = .{ .kind = .fault, .time_ms = simulation.fault_next_ms, .slot = 0 };
         }
+        if (simulation.heal_at_ms < best.time_ms) {
+            best = .{ .kind = .heal, .time_ms = simulation.heal_at_ms, .slot = 0 };
+        }
+        if (simulation.propose_next_ms < best.time_ms) {
+            best = .{ .kind = .propose, .time_ms = simulation.propose_next_ms, .slot = 0 };
+        }
         assert(best.time_ms >= now_ms);
         return best;
     }
@@ -510,6 +595,12 @@ pub const Simulation = struct {
             },
             .restart => try simulation.node_restart(io, event.slot),
             .fault => simulation.fault_draw(io),
+            .heal => {
+                simulation.network.heal();
+                simulation.cut_slot = null;
+                simulation.heal_at_ms = std.math.maxInt(u64);
+            },
+            .propose => try simulation.propose_draw(io),
         }
     }
 
@@ -589,6 +680,8 @@ pub const Simulation = struct {
         const prng = &simulation.faults_prng;
         const interval_ms = 1 + prng.uint_less_than(faults.fault_interval_ms_max);
         simulation.fault_next_ms = simulation.virtual_clock.time_ms + interval_ms;
+        if (faults.partition_percent > 0 and simulation.cut_slot == null and
+            prng.chance(faults.partition_percent)) simulation.partition_start();
         if (!prng.chance(faults.crash_percent)) return;
         var up: [nodes_max]u8 = undefined;
         var up_count: u8 = 0;
@@ -609,6 +702,55 @@ pub const Simulation = struct {
         }
         simulation.node_down(io, slot, sim_node.store.unsynced_count(), false);
         simulation.restart_schedule(slot);
+    }
+
+    fn partition_start(simulation: *Simulation) void {
+        const prng = &simulation.faults_prng;
+        const count = simulation.options.nodes_count;
+        var victim: u8 = @intCast(prng.uint_less_than(count));
+        if (prng.chance(50)) {
+            for (0..count) |slot| {
+                const st = simulation.status(@intCast(slot)) orelse continue;
+                if (st.role == .leader) victim = @intCast(slot);
+            }
+        }
+        var storage: [nodes_max]u8 = undefined;
+        var len: usize = 0;
+        for (0..count) |other| {
+            if (other == victim) continue;
+            storage[len] = @intCast(other);
+            len += 1;
+        }
+        simulation.network.set_partition(&.{victim}, storage[0..len]);
+        simulation.cut_slot = victim;
+        simulation.partitions += 1;
+        const pm: u64 = simulation.options.faults.partition_ms_max;
+        simulation.heal_at_ms = simulation.virtual_clock.time_ms + 1 + prng.uint_less_than(pm);
+    }
+
+    fn propose_draw(simulation: *Simulation, io: Io) Error!void {
+        const prng = &simulation.workload_prng;
+        const im: u64 = simulation.options.proposals.interval_ms_max;
+        simulation.propose_next_ms = simulation.virtual_clock.time_ms + 1 + prng.uint_less_than(im);
+        var leaders: [nodes_max]u8 = undefined;
+        var n: u8 = 0;
+        for (0..simulation.options.nodes_count) |slot| {
+            const st = simulation.status(@intCast(slot)) orelse continue;
+            if (st.role != .leader) continue;
+            leaders[n] = @intCast(slot);
+            n += 1;
+        }
+        if (n == 0) return;
+        const slot = leaders[@intCast(prng.uint_less_than(n))];
+        var data: [8]u8 = @splat(0);
+        simulation.propose_seq +%= 1;
+        data[0] = simulation.propose_seq;
+        const len = simulation.options.proposals.data_bytes;
+        simulation.nodes[slot].driver.propose(io, data[0..len]) catch |err| switch (err) {
+            error.ProposeNotLeader, error.ProposeLogFull => return,
+            else => return simulation.node_fault(io, slot, err),
+        };
+        simulation.proposed += 1;
     }
 
     /// The checks after every event: node and network invariants, the `Checker` over all
