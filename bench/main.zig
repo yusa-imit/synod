@@ -7,14 +7,32 @@ const Io = std.Io;
 const assert = std.debug.assert;
 const synod = @import("synod");
 
-const Bench = struct { name: []const u8, run: *const fn (std.mem.Allocator) anyerror!u64 };
+const Bench = struct { name: []const u8, run: *const fn (Io, std.mem.Allocator) anyerror!u64 };
 
-fn noop(_: std.mem.Allocator) !u64 {
+fn noop(_: Io, _: std.mem.Allocator) !u64 {
     return 1;
+}
+
+/// Scenarios `sim_cluster_5_nodes_10s` runs, one seed each; `ns/op` is the mean time of one.
+const sim_runs_count: u64 = 11;
+
+/// PRD §5: a 5-node cluster over 10 s of virtual time (healthy network, a proposal every
+/// 100 ms at most), target under 50 ms per scenario. Returns the scenarios run.
+fn sim_cluster_5_nodes_10s(io: Io, gpa: std.mem.Allocator) !u64 {
+    var report: synod.sim.Report = undefined;
+    for (0..sim_runs_count) |seed| {
+        var options = synod.sim.Options.quiet(seed, 5);
+        options.proposals = .{ .interval_ms_max = 100, .data_bytes = 2 };
+        const stats = try synod.sim.run_seed(io, gpa, &options, 10_000, &report);
+        assert(stats.events > 0);
+        assert(stats.applied > 0);
+    }
+    return sim_runs_count;
 }
 
 const benches = [_]Bench{
     .{ .name = "noop", .run = noop },
+    .{ .name = "sim_cluster_5_nodes_10s", .run = sim_cluster_5_nodes_10s },
 };
 
 fn matches_filter(name: []const u8, filter: ?[]const u8) bool {
@@ -40,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
     for (benches) |b| {
         if (!matches_filter(b.name, filter)) continue;
         const start = Io.Clock.Timestamp.now(init.io, .awake);
-        const ops = try b.run(gpa);
+        const ops = try b.run(init.io, gpa);
         const elapsed = start.untilNow(init.io);
         assert(elapsed.raw.nanoseconds >= 0);
         const ns: u64 = @intCast(@max(elapsed.raw.nanoseconds, 0));

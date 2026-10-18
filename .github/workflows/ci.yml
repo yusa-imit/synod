@@ -28,13 +28,23 @@ jobs:
       - name: Clear Zig cache
         run: rm -rf .zig-cache zig-out
       - name: Format check
-        run: zig fmt --check src build.zig bench
+        run: zig fmt --check src build.zig bench tools
       - name: Build
         run: zig build
       - name: Test
         run: zig build test
       - name: Bench (compile + smoke run)
         run: zig build bench -- __ci_no_match__
+      - name: Simulator sweep (1000 seeds)
+        run: zig build sim -Dseeds=1000
+      - name: Simulator sweep catches a planted fault
+        run: |
+          if zig build sim -Dseeds=200 -Dplant=lose_synced_hard_state 2> planted.log; then
+            echo "the planted fault passed the sweep"
+            exit 1
+          fi
+          cat planted.log
+          grep -q 'FAIL seed=' planted.log
 
   cross-compile:
     name: Cross-compile (${{ matrix.target }})
