@@ -45,3 +45,26 @@ jobs:
             exit 1
           fi
           grep -q 'FAIL seed=[0-9]* .* violation=ElectionSafety' planted.log
+
+  cross-compile:
+    name: Cross-compile (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-linux-gnu
+          - aarch64-linux-gnu
+          - x86_64-macos-none
+          - aarch64-macos-none
+          - x86_64-windows-msvc
+          - aarch64-windows-msvc
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+      - name: Clear Zig cache
+        run: rm -rf .zig-cache zig-out
+      - name: Build
+        run: zig build -Dtarget=${{ matrix.target }}
