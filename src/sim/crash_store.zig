@@ -45,6 +45,7 @@ pub const CrashStore = struct {
     /// What survives a crash plus the synced prefix; `live` is what the node sees.
     durable: MemoryStore,
     live: MemoryStore,
+    truncates: u64 = 0,
     fault: Fault,
     ops: []Op,
     ops_len: u32,
@@ -176,6 +177,7 @@ pub const CrashStore = struct {
 
     pub fn truncate(crash_store: *CrashStore, from: Index) LogStore.UpdateError!void {
         if (crash_store.fires()) return error.StoreIoFailed;
+        crash_store.truncates += 1;
         try crash_store.live.truncate(from);
         _ = crash_store.make_room(0, 0);
         crash_store.push(.{ .truncate = from });
