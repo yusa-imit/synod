@@ -55,7 +55,7 @@ it into the public `sim` module (PRD §4.5) instead of growing a second harness.
       `flip_data`) onto `Simulation`; delete its `Cluster`. *Failing test first:* the ported
       floor and planted-fault tests run red against item 4's sim before wiring. *Verify:*
       `zig build test` < 10 s, `cluster_test.zig` gone or < 150 lines. `blocked_by: none`
-- [ ] 7. **3C `zig build sim -Dseeds=N`.** A build step (default 1000, `-Dseed=S` replays one),
+- [x] 7. **3C `zig build sim -Dseeds=N`.** A build step (default 1000, `-Dseed=S` replays one),
       ReleaseSafe, prints the first failing `Report` and exits non-zero; a CI step runs
       `-Dseeds=1000`; `zig build bench` gains PRD §5's scenario (5 nodes, 10 s virtual).
       *Failing test first:* a planted-fault option exits non-zero naming the seed. *Verify:*

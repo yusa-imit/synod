@@ -7,6 +7,13 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- `tools/sim.zig`, `zig build sim` (plan 004 item 7): a ReleaseSafe seed sweep of the stress
+  preset (crashes, partitions, proposals, lossy network; 10 s virtual per seed) with `-Dseeds=N`
+  (default 1000), `-Dseed=S` (replay one), `-Dseed_start=S` and `-Dplant=NAME`; the first
+  failing `Report` goes to stderr with its replay command and the exit code is 1. CI runs 1000
+  seeds and requires a planted lost synced write to fail. `zig build bench` gains
+  `sim_cluster_5_nodes_10s` (PRD section 5; about 22 ms mean per scenario, target under 50 ms).
+
 - `src/sim/simulation_churn_test.zig` (plan 004 item 6): `Faults.partition_percent`/
   `partition_ms_max` (seeded one-node cuts that heal) and `Proposals` (seeded leader proposals)
   in `Simulation`, new `Stats.truncates`/`partitions`/`proposed`, `OptionsError` refusals at

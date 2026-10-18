@@ -5,6 +5,7 @@
 //!   zig build            — build library + CLI
 //!   zig build test       — run all unit tests
 //!   zig build bench      — run benchmarks (ReleaseFast recommended)
+//!   zig build sim        — seed sweep of the simulator (-Dseeds=N, -Dseed=S, -Dplant=NAME)
 //!   zig build docs       — generate API docs into zig-out/docs
 
 const std = @import("std");
@@ -29,6 +30,9 @@ pub fn build(b: *std.Build) void {
 
     // Benchmarks
     add_bench_step(b, mod, target, tests.step);
+
+    // Simulator seed sweep
+    add_sim_step(b, mod, target, tests.step);
 
     // Docs
     add_docs_step(b, tests.mod_tests);
@@ -137,6 +141,43 @@ fn add_bench_step(
     const bench_tests = b.addTest(.{ .root_module = bench.root_module });
     const run_bench_tests = b.addRunArtifact(bench_tests);
     test_step.dependOn(&run_bench_tests.step);
+}
+
+/// `zig build sim`: `tools/sim.zig` in ReleaseSafe, so the sweep keeps its assertions on.
+/// `-Dseed=S` replays one seed; otherwise `-Dseeds=N` (default 1000) seeds from `-Dseed_start`.
+fn add_sim_step(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    test_step: *std.Build.Step,
+) void {
+    const seeds = b.option(u64, "seeds", "Seeds `zig build sim` runs (default 1000)");
+    const seed = b.option(u64, "seed", "Replay exactly this seed with `zig build sim`");
+    const seed_start = b.option(u64, "seed_start", "First seed of the sweep (default 0)");
+    const plant = b.option([]const u8, "plant", "Plant a fault the sweep must catch");
+
+    const sim = b.addExecutable(.{
+        .name = "synod-sim",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/sim.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .imports = &.{
+                .{ .name = "synod", .module = mod },
+            },
+        }),
+    });
+    const run_sim = b.addRunArtifact(sim);
+    if (seed) |value| run_sim.addArg(b.fmt("--seed={d}", .{value}));
+    if (seeds) |value| run_sim.addArg(b.fmt("--seeds={d}", .{value}));
+    if (seed_start) |value| run_sim.addArg(b.fmt("--seed-start={d}", .{value}));
+    if (plant) |value| run_sim.addArg(b.fmt("--plant={s}", .{value}));
+    const sim_step = b.step("sim", "Run the simulator over a window of seeds");
+    sim_step.dependOn(&run_sim.step);
+
+    const sim_tests = b.addTest(.{ .root_module = sim.root_module });
+    const run_sim_tests = b.addRunArtifact(sim_tests);
+    test_step.dependOn(&run_sim_tests.step);
 }
 
 fn add_docs_step(b: *std.Build, mod_tests: *std.Build.Step.Compile) void {
