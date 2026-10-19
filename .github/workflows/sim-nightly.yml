@@ -1,0 +1,37 @@
+name: Simulator nightly
+
+# A long seed sweep, apart from CI: its failure mode is the runtime cap, not a red build. The
+# seed window rotates by date, so every night covers seeds no earlier night ran (the window
+# start is the UTC day number times `seeds`). A failing seed is replayed with
+# `zig build sim -Dseed=S` (the sweep prints the command).
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: 'Seeds to run'
+        default: '100000'
+      plant:
+        description: 'Planted fault (none or lose_synced_hard_state); a planted run must fail'
+        default: 'none'
+
+jobs:
+  sweep:
+    name: Seed sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+      - name: Sweep
+        env:
+          SEEDS: ${{ inputs.seeds || '100000' }}
+          PLANT: ${{ inputs.plant || 'none' }}
+        run: |
+          set -o pipefail
+          start=$(( $(date -u +%s) / 86400 * SEEDS ))
+          echo "seed window: start=$start seeds=$SEEDS plant=$PLANT"
+          zig build sim -Dseeds="$SEEDS" -Dseed_start="$start" -Dplant="$PLANT" 2>&1 | tee sweep.log
