@@ -61,7 +61,7 @@ it into the public `sim` module (PRD §4.5) instead of growing a second harness.
       *Failing test first:* a planted-fault option exits non-zero naming the seed. *Verify:*
       CI job green; bench median recorded in `STATE.md` against the < 50 ms target.
       `blocked_by: none`
-- [ ] 8. **Nightly 100k-seed sweep.** Scheduled + `workflow_dispatch` job running
+- [x] 8. **Nightly 100k-seed sweep.** Scheduled + `workflow_dispatch` job running
       `zig build sim -Dseeds=100000` (PRD §4.5), seed window rotated by date. Why separate: its
       own failure mode (runtime cap). *Verify:* `gh run list --workflow sim-nightly.yml` success.
       *Failing test first:* a dispatch with item 7's planted fault goes red. `blocked_by: none`

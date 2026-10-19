@@ -14,6 +14,11 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- `.github/workflows/sim-nightly.yml` (plan 004 item 8): a nightly (03:17 UTC) and manually
+  dispatchable `zig build sim -Dseeds=100000` sweep whose seed window rotates by UTC day
+  (`-Dseed_start` = day number times `seeds`); inputs `seeds` and `plant` (a planted fault must
+  turn the run red). Separate from CI so its runtime cap is its own failure mode.
+
 - `tools/sim.zig`, `zig build sim` (plan 004 item 7): a ReleaseSafe seed sweep of the stress
   preset (crashes, partitions, proposals, lossy network; 10 s virtual per seed) with `-Dseeds=N`
   (default 1000), `-Dseed=S` (replay one), `-Dseed_start=S` and `-Dplant=NAME`; the first
