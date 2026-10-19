@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `Simulation` review findings (plan 004 items 4 and 6): `init` returns `CrashPercentInvalid`,
+  `TornPercentInvalid` and `DownDurationInvalid` instead of asserting mid-run; a proposal of
+  more than 8 bytes no longer overruns its buffer; the proposal switch names `ProposeTooLarge`;
+  `partition_start` and `propose_draw` are documented and asserted.
+
 ### Added
 
 - `tools/sim.zig`, `zig build sim` (plan 004 item 7): a ReleaseSafe seed sweep of the stress

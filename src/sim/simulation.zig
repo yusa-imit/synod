@@ -80,11 +80,11 @@ pub const Plant = enum(u8) {
 pub const Faults = struct {
     /// A fault draw happens every `[1, fault_interval_ms_max]` ms; 0 disables fault draws.
     fault_interval_ms_max: u32,
-    /// Percent of fault draws that crash a seeded up node (the rest do nothing yet).
+    /// Percent of fault draws that crash a seeded up node (the rest do nothing yet); at most 100.
     crash_percent: u8,
-    /// Percent of crashes that are torn (`arm_failure` on the node's store).
+    /// Percent of crashes that are torn (`arm_failure` on the node's store); at most 100.
     torn_percent: u8,
-    /// A crashed node restarts `[1, down_ms_max]` ms later.
+    /// A crashed node restarts `[1, down_ms_max]` ms later; positive when `crash_percent > 0`.
     down_ms_max: u32,
     /// Percent of fault draws that cut one seeded node off from all the others (both
     /// directions), unless a cut is already active. At most 100; positive needs
@@ -226,6 +226,9 @@ pub const OptionsError = error{
     PartitionDurationInvalid,
     FaultIntervalInvalid,
     ProposalBytesInvalid,
+    CrashPercentInvalid,
+    TornPercentInvalid,
+    DownDurationInvalid,
 };
 
 pub const Error = invariants.Violation || LimitError || NodeError || OptionsError;
@@ -343,11 +346,12 @@ pub const Simulation = struct {
         assert(simulation.events == 0);
     }
 
-    /// Refuses cut and proposal settings that could never run, before `init` allocates.
+    /// Refuses fault and proposal settings that could never run, before `init` allocates.
     fn options_validate(options: *const Options) OptionsError!void {
         const faults = options.faults;
-        assert(faults.crash_percent <= 100);
-        assert(faults.torn_percent <= 100);
+        if (faults.crash_percent > 100) return error.CrashPercentInvalid;
+        if (faults.torn_percent > 100) return error.TornPercentInvalid;
+        if (faults.crash_percent > 0 and faults.down_ms_max == 0) return error.DownDurationInvalid;
         if (faults.partition_percent > 100) return error.PartitionPercentInvalid;
         if (faults.partition_percent > 0) {
             if (faults.fault_interval_ms_max == 0) return error.FaultIntervalInvalid;
@@ -704,7 +708,12 @@ pub const Simulation = struct {
         simulation.restart_schedule(slot);
     }
 
+    /// Cuts one seeded node off from all the others (a seeded leader half the time) and
+    /// schedules the heal `[1, partition_ms_max]` ms from now. Precondition: no cut is active
+    /// and cuts are on.
     fn partition_start(simulation: *Simulation) void {
+        assert(simulation.cut_slot == null);
+        assert(simulation.options.faults.partition_ms_max > 0);
         const prng = &simulation.faults_prng;
         const count = simulation.options.nodes_count;
         var victim: u8 = @intCast(prng.uint_less_than(count));
@@ -721,33 +730,46 @@ pub const Simulation = struct {
             storage[len] = @intCast(other);
             len += 1;
         }
+        assert(len == count - 1);
         simulation.network.set_partition(&.{victim}, storage[0..len]);
         simulation.cut_slot = victim;
         simulation.partitions += 1;
-        const pm: u64 = simulation.options.faults.partition_ms_max;
-        simulation.heal_at_ms = simulation.virtual_clock.time_ms + 1 + prng.uint_less_than(pm);
+        const duration_ms_max: u64 = simulation.options.faults.partition_ms_max;
+        const duration_ms = 1 + prng.uint_less_than(duration_ms_max);
+        simulation.heal_at_ms = simulation.virtual_clock.time_ms + duration_ms;
+        assert(simulation.heal_at_ms > simulation.virtual_clock.time_ms);
     }
 
+    /// One seeded proposal: a node that believes it leads proposes `data_bytes` bytes (the first
+    /// is a sequence number, wrapping at 256, the rest zero) and the next draw is scheduled
+    /// `[1, interval_ms_max]` ms from now. No leader, `ProposeNotLeader` and `ProposeLogFull`
+    /// are swallowed. Precondition: proposals are on.
     fn propose_draw(simulation: *Simulation, io: Io) Error!void {
+        const interval_ms_max: u64 = simulation.options.proposals.interval_ms_max;
+        assert(interval_ms_max > 0);
+        assert(simulation.options.proposals.data_bytes > 0);
         const prng = &simulation.workload_prng;
-        const im: u64 = simulation.options.proposals.interval_ms_max;
-        simulation.propose_next_ms = simulation.virtual_clock.time_ms + 1 + prng.uint_less_than(im);
+        const interval_ms = 1 + prng.uint_less_than(interval_ms_max);
+        simulation.propose_next_ms = simulation.virtual_clock.time_ms + interval_ms;
         var leaders: [nodes_max]u8 = undefined;
-        var n: u8 = 0;
+        var leaders_count: u8 = 0;
         for (0..simulation.options.nodes_count) |slot| {
             const st = simulation.status(@intCast(slot)) orelse continue;
             if (st.role != .leader) continue;
-            leaders[n] = @intCast(slot);
-            n += 1;
+            leaders[leaders_count] = @intCast(slot);
+            leaders_count += 1;
         }
-        if (n == 0) return;
-        const slot = leaders[@intCast(prng.uint_less_than(n))];
-        var data: [8]u8 = @splat(0);
+        if (leaders_count == 0) return;
+        const slot = leaders[@intCast(prng.uint_less_than(leaders_count))];
+        // `data_bytes` is a u8: the buffer holds any value `options_validate` accepts.
+        var data: [std.math.maxInt(u8)]u8 = @splat(0);
         simulation.propose_seq +%= 1;
         data[0] = simulation.propose_seq;
         const len = simulation.options.proposals.data_bytes;
         simulation.nodes[slot].driver.propose(io, data[0..len]) catch |err| switch (err) {
             error.ProposeNotLeader, error.ProposeLogFull => return,
+            // `options_validate` bounds `data_bytes` by `entry_bytes_max`: a harness bug.
+            error.ProposeTooLarge => return err,
             else => return simulation.node_fault(io, slot, err),
         };
         simulation.proposed += 1;

@@ -54,4 +54,6 @@ test {
     _ = @import("sim/simulation_crash_test.zig");
     // Plan 004 item 6: churn (seeded partitions, proposals, truncates) retires cluster_test.
     _ = @import("sim/simulation_churn_test.zig");
+    // The review findings of items 4 and 6: option validation and the proposal buffer.
+    _ = @import("sim/simulation_options_test.zig");
 }
