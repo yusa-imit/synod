@@ -6,7 +6,7 @@
 //!   - `sim/invariants.zig`: plan 004 item 3 (landed)
 //!   - `sim/simulation.zig`: plan 004 item 4 (event loop; landed)
 //!   - `sim/crash_store.zig`: plan 004 item 5 (crash and restart; landed)
-//!   - `sim/linearizability.zig`: plan 004 item 9 (history checker; red stage)
+//!   - `sim/linearizability.zig`: plan 004 item 9 (history checker; landed)
 //!   - `sim/workload.zig`: planned
 //!
 //! Status: partial. Public declarations are added as plan 004 items land.

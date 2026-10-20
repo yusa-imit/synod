@@ -317,3 +317,19 @@ test "linearizability: memory is linear in history_ops_max and free of keys_max"
     try testing.expect(large <= 10 * small + slack);
     try testing.expect(large > small);
 }
+
+test "linearizability: twelve pending puts do not exhaust a modest budget on a violation" {
+    // A completed put 100, then a read of the pending 5, then a read of 100 again: no valid
+    // order. Pending puts nobody reads are skipped, so the verdict is a violation, not
+    // `CheckInconclusive` from trying every position of every pending put.
+    var buf: [15]Operation = undefined;
+    for (0..12) |index| {
+        const client: u16 = @intCast(index + 1);
+        buf[index] = fx.put_pending(client, 0, client, client);
+    }
+    buf[12] = put(0, 0, 100, 20, 21);
+    buf[13] = get(0, 0, 5, 30, 31);
+    buf[14] = get(0, 0, 100, 40, 41);
+    const result = verdict_with(budget_options(10_000), &buf);
+    try testing.expectError(error.Linearizability, result);
+}

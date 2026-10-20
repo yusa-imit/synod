@@ -14,6 +14,12 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- `sim/linearizability.zig` (plan 004 item 9): `HistoryChecker`, a Wing–Gong search over a
+  per-key register model (split per key, explicit stack, no recursion, allocation in `init`
+  only). Pending puts may or may not take effect; a history over `history_ops_max` returns
+  `HistoryTooLong` and a search past `search_steps_max` returns `CheckInconclusive`, never a
+  pass.
+
 - `.github/workflows/sim-nightly.yml` (plan 004 item 8): a nightly (03:17 UTC) and manually
   dispatchable `zig build sim -Dseeds=100000` sweep whose seed window rotates by UTC day
   (`-Dseed_start` = day number times `seeds`); inputs `seeds` and `plant` (a planted fault must
