@@ -6,7 +6,8 @@
 //!   - `sim/invariants.zig`: plan 004 item 3 (landed)
 //!   - `sim/simulation.zig`: plan 004 item 4 (event loop; landed)
 //!   - `sim/crash_store.zig`: plan 004 item 5 (crash and restart; landed)
-//!   - `sim/linearizability.zig`, `sim/workload.zig`: planned
+//!   - `sim/linearizability.zig`: plan 004 item 9 (history checker; red stage)
+//!   - `sim/workload.zig`: planned
 //!
 //! Status: partial. Public declarations are added as plan 004 items land.
 
@@ -18,11 +19,13 @@ pub const network = @import("sim/network.zig");
 pub const crash_store = @import("sim/crash_store.zig");
 pub const invariants = @import("sim/invariants.zig");
 pub const simulation = @import("sim/simulation.zig");
+pub const linearizability = @import("sim/linearizability.zig");
 pub const Prng = prng.Prng;
 pub const VirtualClock = clock.VirtualClock;
 pub const Network = network.Network;
 pub const CrashStore = crash_store.CrashStore;
 pub const Checker = invariants.Checker;
+pub const HistoryChecker = linearizability.HistoryChecker;
 pub const Simulation = simulation.Simulation;
 pub const Options = simulation.Options;
 pub const Report = simulation.Report;
@@ -56,4 +59,8 @@ test {
     _ = @import("sim/simulation_churn_test.zig");
     // The review findings of items 4 and 6: option validation and the proposal buffer.
     _ = @import("sim/simulation_options_test.zig");
+    // Plan 004 item 9: the linearizability checker.
+    _ = @import("sim/linearizability_test.zig");
+    _ = @import("sim/linearizability_limits_test.zig");
+    _ = @import("sim/linearizability_model_test.zig");
 }
