@@ -7,16 +7,18 @@
 //! `Driver.receive`) or a tick (every node's `Driver.poll` at the next multiple of `tick_ms`).
 //! The next event is the earliest by time; at equal times a delivery precedes the tick (the
 //! fixed order `deliver < tick`). Scripted proposals (`propose`) and partition changes through
-//! `network` happen between events and are not events.
+//! `network` happen between events and are not events. The KV workload's commands are events
+//! (`command`, the last kind): see `workload_hooks.zig`.
 //!
 //! Invariants: after every event each node's `check_invariants()`, the network's, and the
 //! `Checker` (observations of all nodes, then the drained applied records) all hold. The first
 //! failure is latched: it fills the `Report`, and a later `step` asserts. `EventsExhausted`
 //! is latched too, but stepping again just returns it again.
 //!
-//! Allocation: `init` only. Per node: a `MemoryStore`, a recorder of `log_entries_max`
+//! Allocation: `init` only. Per node: a `MemoryStore`, a `KvStateMachine` of `log_entries_max`
 //! applied records and one buffer of `Driver.init_bytes_max(&config)` bytes backing a
-//! `FixedBufferAllocator` that `Driver.init` uses; plus the `Network` and the `Checker`.
+//! `FixedBufferAllocator` that `Driver.init` uses; plus the `Network`, the `Checker`, the
+//! `Workload` and the `HistoryChecker`.
 //! `step`, `run_until`, `propose` and every query allocate nothing. The simulation stores
 //! neither `gpa` nor `io`; both are passed to each call that needs them.
 //!
@@ -37,7 +39,9 @@ const crash_store_module = @import("crash_store.zig");
 const invariants = @import("invariants.zig");
 const network_module = @import("network.zig");
 const prng_module = @import("prng.zig");
+const linearizability_module = @import("linearizability.zig");
 const sim_node_module = @import("sim_node.zig");
+const workload_hooks = @import("workload_hooks.zig");
 const workload_module = @import("workload.zig");
 
 const Checker = invariants.Checker;
@@ -46,10 +50,10 @@ const Driver = driver_module.Driver;
 const Network = network_module.Network;
 const NodeId = types.NodeId;
 const Prng = prng_module.Prng;
-const Recorder = sim_node_module.Recorder;
-const Applied = sim_node_module.Applied;
+const HistoryChecker = linearizability_module.HistoryChecker;
 const SimNode = sim_node_module.SimNode;
 const VirtualClock = clock_module.VirtualClock;
+const KvStateMachine = workload_module.KvStateMachine;
 const Workload = workload_module.Workload;
 
 /// The most nodes a simulation has; equal to the network's matrix size.
@@ -144,7 +148,8 @@ pub const Options = struct {
 
     /// A healthy, lossless, fault-free cluster of `nodes_count` nodes: delays 1..10 ms,
     /// 10 ms ticks, election timeout 100..200 ms, heartbeat 30 ms, 64-entry logs of at most
-    /// 8 data bytes per entry, 4 entries per message.
+    /// `command_bytes` data bytes per entry (room for one KV command), 4 entries per message,
+    /// and no workload (`clients_count == 0`).
     pub fn quiet(seed: u64, nodes_count: u8) Options {
         assert(nodes_count >= 2);
         assert(nodes_count <= nodes_max);
@@ -161,10 +166,10 @@ pub const Options = struct {
                 .learners_max = 0,
                 .inflight_max = 4,
                 .log_entries_max = 64,
-                .log_bytes_max = 64 * 8,
+                .log_bytes_max = 64 * workload_module.command_bytes,
                 .message_limits = .{
                     .entries_max = 4,
-                    .entry_bytes_max = 8,
+                    .entry_bytes_max = workload_module.command_bytes,
                     .snapshot_bytes_max = 0,
                 },
             },
@@ -192,12 +197,21 @@ pub const Options = struct {
         };
     }
 
-    /// 3 nodes (even seed) or 5 (odd seed), a lossy, duplicating, slower network.
+    /// 3 nodes (even seed) or 5 (odd seed), a lossy, duplicating, slower network, and the KV
+    /// workload on: 3 clients over 4 keys, half of the commands puts, one every 1..40 ms.
     pub fn sweep(seed: u64) Options {
         var options = quiet(seed, if (seed % 2 == 0) 3 else 5);
         options.network.delay_ms_max = 15;
         options.network.loss_percent = 5;
         options.network.duplicate_percent = 5;
+        options.workload = .{
+            .clients_count = 3,
+            .keys_count = 4,
+            .put_percent = 50,
+            .op_interval_ms_max = 40,
+            .fault = .none,
+        };
+        assert(options.workload.put_percent < 100);
         assert(options.network.delay_ms_max >= options.network.delay_ms_min);
         assert(options.network.loss_percent <= 100);
         return options;
@@ -230,14 +244,16 @@ pub const Stats = struct {
     digest: u64,
 };
 
-/// Limits of the harness itself; not safety violations.
+/// Limits of the harness itself; not safety violations. `HistoryTooLong` and `CheckInconclusive`
+/// come from `check(.linearizability)`.
 pub const LimitError = error{ EventsExhausted, TermsExhausted, HistoryTooLong, CheckInconclusive };
 
 /// Everything a node, its store or its state machine can report through a `Driver`.
 pub const NodeError = raft.InvariantError || raft.InitError || raft.ReceiveError ||
     raft.ProposeError || Network.InvariantError || interfaces.LogStore.WriteError ||
     interfaces.LogStore.ReadError || interfaces.StateMachine.ApplyError ||
-    CrashStore.InvariantError;
+    CrashStore.InvariantError || workload_module.KvStateMachine.InvariantError ||
+    Workload.InvariantError;
 
 /// `Options` the simulation refuses at `init`, before it allocates anything.
 pub const OptionsError = error{
@@ -248,7 +264,7 @@ pub const OptionsError = error{
     CrashPercentInvalid,
     TornPercentInvalid,
     DownDurationInvalid,
-};
+} || workload_hooks.OptionsError;
 
 pub const Error = invariants.Violation || LimitError || NodeError || OptionsError;
 
@@ -256,9 +272,10 @@ pub const Error = invariants.Violation || LimitError || NodeError || OptionsErro
 pub const Report = struct { seed: u64, event_index: u64, violation: Error };
 
 /// What the next event is and when it happens. At equal times the order is the declaration
-/// order: `deliver < tick < restart < fault`. `slot` is the node of a `restart`.
+/// order: `deliver < tick < restart < fault < heal < propose < command`. `slot` is the node of
+/// a `restart`.
 const Event = struct {
-    kind: enum(u8) { deliver, tick, restart, fault, heal, propose },
+    kind: enum(u8) { deliver, tick, restart, fault, heal, propose, command },
     time_ms: u64,
     slot: u8,
 };
@@ -271,6 +288,7 @@ pub const Simulation = struct {
     options: Options,
     checker: Checker,
     workload: Workload,
+    history_checker: HistoryChecker,
     nodes: [nodes_max]SimNode,
     /// Virtual time of the next tick event.
     tick_next_ms: u64,
@@ -320,23 +338,12 @@ pub const Simulation = struct {
         simulation.torn_crashes = 0;
         simulation.lossy_crashes = 0;
         simulation.restarts = 0;
-        simulation.faults_prng = Prng.init(prng_module.derive_seed(options.seed, .faults, 0));
-        simulation.fault_next_ms = std.math.maxInt(u64);
         simulation.partitions = 0;
         simulation.proposed = 0;
         simulation.cut_slot = null;
         simulation.heal_at_ms = std.math.maxInt(u64);
         simulation.propose_seq = 0;
-        simulation.workload_prng = Prng.init(prng_module.derive_seed(options.seed, .workload, 0));
-        simulation.propose_next_ms = std.math.maxInt(u64);
-        if (options.proposals.interval_ms_max > 0) {
-            const im: u64 = options.proposals.interval_ms_max;
-            simulation.propose_next_ms = 1 + simulation.workload_prng.uint_less_than(im);
-        }
-        if (options.faults.fault_interval_ms_max > 0) {
-            const interval_ms_max: u64 = options.faults.fault_interval_ms_max;
-            simulation.fault_next_ms = 1 + simulation.faults_prng.uint_less_than(interval_ms_max);
-        }
+        simulation.schedule_start(options);
 
         const network_options: Network.Options = .{
             .nodes_count = options.nodes_count,
@@ -358,6 +365,13 @@ pub const Simulation = struct {
         try simulation.workload_start(gpa, options);
         errdefer simulation.workload.deinit(gpa);
 
+        try simulation.history_checker.init(gpa, .{
+            .history_ops_max = options.history_ops_max,
+            .keys_max = options.workload.keys_count,
+            .search_steps_max = options.search_steps_max,
+        });
+        errdefer simulation.history_checker.deinit(gpa);
+
         var built: u8 = 0;
         errdefer for (simulation.nodes[0..built]) |*sim_node| sim_node.deinit(io, gpa);
 
@@ -369,11 +383,35 @@ pub const Simulation = struct {
         assert(simulation.events == 0);
     }
 
+    /// Seeds the fault and proposal streams and draws the first fault and proposal times.
+    fn schedule_start(simulation: *Simulation, options: *const Options) void {
+        simulation.faults_prng = Prng.init(prng_module.derive_seed(options.seed, .faults, 0));
+        simulation.fault_next_ms = std.math.maxInt(u64);
+        simulation.workload_prng = Prng.init(prng_module.derive_seed(options.seed, .workload, 0));
+        simulation.propose_next_ms = std.math.maxInt(u64);
+        if (options.proposals.interval_ms_max > 0) {
+            const im: u64 = options.proposals.interval_ms_max;
+            simulation.propose_next_ms = 1 + simulation.workload_prng.uint_less_than(im);
+        }
+        if (options.faults.fault_interval_ms_max > 0) {
+            const interval_ms_max: u64 = options.faults.fault_interval_ms_max;
+            simulation.fault_next_ms = 1 + simulation.faults_prng.uint_less_than(interval_ms_max);
+        }
+        assert(simulation.propose_next_ms > 0);
+        assert(simulation.fault_next_ms > 0);
+    }
+
     /// Builds the workload from its own `derive_seed(.workload, 1)` stream (lane 0 is the
-    /// seeded `Proposals`).
-    fn workload_start(simulation: *Simulation, gpa: Allocator, options: *const Options) !void {
+    /// seeded `Proposals`). The `ack_uncommitted` plant turns the workload's fault on.
+    fn workload_start(
+        simulation: *Simulation,
+        gpa: Allocator,
+        options: *const Options,
+    ) Allocator.Error!void {
         const seed = prng_module.derive_seed(options.seed, .workload, 1);
-        try simulation.workload.init(gpa, options.workload, options.history_ops_max, Prng.init(seed));
+        var spec = options.workload;
+        if (options.plant == .ack_uncommitted) spec.fault = .ack_uncommitted;
+        try simulation.workload.init(gpa, spec, options.history_ops_max, Prng.init(seed));
     }
 
     /// Refuses fault and proposal settings that could never run, before `init` allocates.
@@ -387,6 +425,12 @@ pub const Simulation = struct {
             if (faults.fault_interval_ms_max == 0) return error.FaultIntervalInvalid;
             if (faults.partition_ms_max == 0) return error.PartitionDurationInvalid;
         }
+        try workload_hooks.validate(
+            options.workload,
+            options.history_ops_max,
+            options.search_steps_max,
+            options.raft.message_limits.entry_bytes_max,
+        );
         if (options.proposals.interval_ms_max > 0) {
             const bytes_max = options.raft.message_limits.entry_bytes_max;
             if (options.proposals.data_bytes == 0) return error.ProposalBytesInvalid;
@@ -400,6 +444,7 @@ pub const Simulation = struct {
         assert(simulation.options.nodes_count <= nodes_max);
         const nodes = simulation.nodes[0..simulation.options.nodes_count];
         for (nodes) |*sim_node| sim_node.deinit(io, gpa);
+        simulation.history_checker.deinit(gpa);
         simulation.workload.deinit(gpa);
         simulation.checker.deinit(gpa);
         simulation.network.deinit(gpa);
@@ -464,11 +509,16 @@ pub const Simulation = struct {
         simulation.check_after() catch |err| return simulation.latch(err);
     }
 
-    /// The first latched violation of `property` (item 9 adds the linearizability check).
+    /// The first latched violation of `property`. `.linearizability` runs the `HistoryChecker`
+    /// over the workload's history: `Linearizability` if none exists, `CheckInconclusive` if
+    /// the search budget ran out (never a pass), `HistoryTooLong` past `history_ops_max`.
     pub fn check(simulation: *Simulation, property: invariants.Property) Error!void {
         assert(simulation.options.nodes_count >= 2);
         switch (property) {
-            .linearizability => {}, // No history before item 9: nothing can be violated.
+            .linearizability => {
+                try simulation.workload.check_invariants();
+                try simulation.history_checker.check(simulation.workload.history());
+            },
             .election_safety,
             .leader_append_only,
             .log_matching,
@@ -590,6 +640,9 @@ pub const Simulation = struct {
         if (simulation.propose_next_ms < best.time_ms) {
             best = .{ .kind = .propose, .time_ms = simulation.propose_next_ms, .slot = 0 };
         }
+        if (simulation.workload.next_due_ms()) |due_ms| {
+            if (due_ms < best.time_ms) best = .{ .kind = .command, .time_ms = due_ms, .slot = 0 };
+        }
         assert(best.time_ms >= now_ms);
         return best;
     }
@@ -637,6 +690,7 @@ pub const Simulation = struct {
                 simulation.heal_at_ms = std.math.maxInt(u64);
             },
             .propose => try simulation.propose_draw(io),
+            .command => try simulation.command_draw(io),
         }
     }
 
@@ -669,6 +723,7 @@ pub const Simulation = struct {
         sim_node.down = true;
         sim_node.torn_pending = false;
         sim_node.restart_at_ms = null;
+        simulation.workload.crashed(slot);
         simulation.crashes += 1;
         if (torn) simulation.torn_crashes += 1;
     }
@@ -689,7 +744,7 @@ pub const Simulation = struct {
         assert(sim_node.down);
         assert(sim_node.store.unsynced_count() == 0);
         sim_node.fba.reset();
-        sim_node.recorder.len = 0; // The state machine is volatile: undrained applies are void.
+        sim_node.kv.reset(); // The state machine is volatile: registers and undrained applies go.
         var config = simulation.options.raft;
         config.id = @enumFromInt(@as(u64, slot) + 1);
         sim_node.restart_at_ms = null;
@@ -807,6 +862,29 @@ pub const Simulation = struct {
         simulation.proposed += 1;
     }
 
+    /// One workload command (the draw schedules the next one): a seeded node that believes it
+    /// leads proposes it. A refusal leaves no record; a store failure is handed to `node_fault`
+    /// (the armed torn crash, which leaves the operation pending, or an error).
+    fn command_draw(simulation: *Simulation, io: Io) Error!void {
+        const now_ms = simulation.virtual_clock.time_ms;
+        assert(simulation.workload.next_due_ms().? <= now_ms);
+        assert(simulation.events > 0);
+        const nodes = simulation.nodes[0..simulation.options.nodes_count];
+        const outcome = workload_hooks.command_event(
+            io,
+            &simulation.workload,
+            nodes,
+            &simulation.workload_prng,
+            now_ms,
+            simulation.events,
+        );
+        switch (outcome) {
+            .idle, .rejected => {},
+            .proposed => {}, // Counted by `Workload.Stats`, not by `Stats.proposed`.
+            .failed => |failure| try simulation.node_fault(io, failure.slot, failure.err),
+        }
+    }
+
     /// The checks after every event: node and network invariants, the `Checker` over all
     /// nodes, then the drained applied records.
     fn check_after(simulation: *Simulation) Error!void {
@@ -827,20 +905,20 @@ pub const Simulation = struct {
         try simulation.network.check_invariants();
         try simulation.checker.observe(observations[0..up_count]);
         for (simulation.nodes[0..count], 0..) |*sim_node, slot| {
-            try simulation.drain(@intCast(slot), &sim_node.recorder);
+            try simulation.drain(@intCast(slot), &sim_node.kv);
         }
         assert(count <= nodes_max);
         simulation.failed_allowed();
     }
 
-    /// Hands the recorded applies of node `slot` to the checker, in apply order.
-    fn drain(simulation: *Simulation, slot: u8, recorder: *Recorder) Error!void {
+    /// Hands the applies of node `slot` to the checker and the workload, in apply order.
+    fn drain(simulation: *Simulation, slot: u8, kv: *KvStateMachine) Error!void {
         assert(slot < simulation.options.nodes_count);
-        assert(recorder.len <= recorder.records.len);
-        defer recorder.len = 0;
-
-        for (recorder.records[0..recorder.len]) |record| {
+        assert(kv.len <= kv.records.len);
+        try kv.check_invariants();
+        for (kv.drain()) |*record| {
             try simulation.checker.applied(slot, record.index, record.entry_fingerprint);
+            simulation.workload.applied(slot, record, simulation.events);
             simulation.applied_total += 1;
             const words = [3]u64{ slot, @intFromEnum(record.index), record.entry_fingerprint };
             simulation.applied_digest = std.hash.Wyhash.hash(
@@ -907,10 +985,12 @@ pub const Simulation = struct {
         try sim_node.store.init(gpa, &store_options);
         errdefer sim_node.store.deinit(gpa);
 
-        sim_node.recorder.records = try gpa.alloc(Applied, config.log_entries_max);
-        errdefer gpa.free(sim_node.recorder.records);
+        try sim_node.kv.init(gpa, .{
+            .keys_count = simulation.options.workload.keys_count,
+            .applied_max = config.log_entries_max,
+        });
+        errdefer sim_node.kv.deinit(gpa);
 
-        sim_node.recorder.len = 0;
         sim_node.down = false;
         sim_node.torn_pending = false;
         sim_node.restart_at_ms = null;
@@ -941,7 +1021,7 @@ pub const Simulation = struct {
         const deps: Driver.Deps = .{
             .store = sim_node.store.as_log_store(),
             .transport = simulation.network.as_transport(),
-            .state_machine = interfaces.StateMachine.init(&sim_node.recorder),
+            .state_machine = sim_node.kv.as_state_machine(),
             .clock = simulation.virtual_clock.as_clock(),
             .rng = sim_node.prng.as_rng(),
         };
@@ -979,8 +1059,8 @@ fn store_fault_of(plant: Plant) CrashStore.Fault {
     };
 }
 
-/// `init`, `run_until(duration_ms)`, `check` of the five properties, `deinit`; on an error the
-/// `Report` is filled in (and `Stats` is lost). Item 9 adds the linearizability check.
+/// `init`, `run_until(duration_ms)`, `check` of the five properties and of linearizability,
+/// `deinit`; on an error the `Report` is filled in (and `Stats` is lost).
 pub fn run_seed(
     io: Io,
     gpa: Allocator,
@@ -1003,7 +1083,7 @@ pub fn run_seed(
     };
     const properties = [_]invariants.Property{
         .election_safety,     .leader_append_only,   .log_matching,
-        .leader_completeness, .state_machine_safety,
+        .leader_completeness, .state_machine_safety, .linearizability,
     };
     for (properties) |property| {
         simulation.check(property) catch |err| {

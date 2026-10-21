@@ -379,7 +379,8 @@ test "init: cuts need fault draws, a zero fault interval with cuts on is refused
 test "init: proposal data_bytes is 1..entry_bytes_max when enabled, 0 interval disables" {
     var options = churny(64, .none);
     const bytes_max = options.raft.message_limits.entry_bytes_max;
-    try testing.expectEqual(@as(u32, 8), bytes_max); // The sweep preset; the bounds below follow.
+    // The sweep preset: room for one 24-byte KV command; the bounds below follow.
+    try testing.expectEqual(@as(u32, 24), bytes_max);
     options.proposals.data_bytes = 0;
     try expect_init_error(options, error.ProposalBytesInvalid);
     options.proposals.data_bytes = 1;
