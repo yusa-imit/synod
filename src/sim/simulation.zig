@@ -38,6 +38,7 @@ const invariants = @import("invariants.zig");
 const network_module = @import("network.zig");
 const prng_module = @import("prng.zig");
 const sim_node_module = @import("sim_node.zig");
+const workload_module = @import("workload.zig");
 
 const Checker = invariants.Checker;
 const CrashStore = crash_store_module.CrashStore;
@@ -49,6 +50,7 @@ const Recorder = sim_node_module.Recorder;
 const Applied = sim_node_module.Applied;
 const SimNode = sim_node_module.SimNode;
 const VirtualClock = clock_module.VirtualClock;
+const Workload = workload_module.Workload;
 
 /// The most nodes a simulation has; equal to the network's matrix size.
 pub const nodes_max: u8 = 7;
@@ -73,6 +75,7 @@ pub const Plant = enum(u8) {
     forge_votes = 2,
     flip_data = 3,
     lose_synced_hard_state = 4,
+    ack_uncommitted = 5,
 };
 
 /// Seeded fault draws (ADR-008 `Faults`, the crash subset of item 5; item 6 adds the partition
@@ -127,6 +130,12 @@ pub const Options = struct {
     network: Network.Model,
     faults: Faults,
     proposals: Proposals,
+    /// The KV workload (plan 004 item 10); `clients_count == 0` is no workload.
+    workload: Workload.Options,
+    /// Operations the workload may invoke, and the size of the history checker (> 0).
+    history_ops_max: u32,
+    /// Search placements `check(.linearizability)` may spend before `CheckInconclusive`.
+    search_steps_max: u64,
     /// Events a simulation may run before `EventsExhausted`.
     events_max: u64,
     /// Terms the checker tracks before `TermsExhausted`.
@@ -168,6 +177,15 @@ pub const Options = struct {
             },
             .faults = Faults.none,
             .proposals = Proposals.none,
+            .workload = .{
+                .clients_count = 0,
+                .keys_count = 1,
+                .put_percent = 50,
+                .op_interval_ms_max = 1,
+                .fault = .none,
+            },
+            .history_ops_max = 256,
+            .search_steps_max = 10_000_000,
             .events_max = 200_000,
             .terms_max = 256,
             .plant = .none,
@@ -204,6 +222,7 @@ pub const Stats = struct {
     /// Seeded proposals a leader accepted (`ProposeNotLeader` and `ProposeLogFull` do not
     /// count).
     proposed: u64,
+    workload: Workload.Stats,
     network: Network.Stats,
     /// A hash of the network trace, the event count, the clock, every applied entry's
     /// fingerprint in apply order, and every node's final status (amends ADR-008: the log
@@ -212,7 +231,7 @@ pub const Stats = struct {
 };
 
 /// Limits of the harness itself; not safety violations.
-pub const LimitError = error{ EventsExhausted, TermsExhausted };
+pub const LimitError = error{ EventsExhausted, TermsExhausted, HistoryTooLong, CheckInconclusive };
 
 /// Everything a node, its store or its state machine can report through a `Driver`.
 pub const NodeError = raft.InvariantError || raft.InitError || raft.ReceiveError ||
@@ -251,6 +270,7 @@ pub const Simulation = struct {
     virtual_clock: VirtualClock,
     options: Options,
     checker: Checker,
+    workload: Workload,
     nodes: [nodes_max]SimNode,
     /// Virtual time of the next tick event.
     tick_next_ms: u64,
@@ -335,6 +355,9 @@ pub const Simulation = struct {
         });
         errdefer simulation.checker.deinit(gpa);
 
+        try simulation.workload_start(gpa, options);
+        errdefer simulation.workload.deinit(gpa);
+
         var built: u8 = 0;
         errdefer for (simulation.nodes[0..built]) |*sim_node| sim_node.deinit(io, gpa);
 
@@ -344,6 +367,13 @@ pub const Simulation = struct {
         }
         assert(built == options.nodes_count);
         assert(simulation.events == 0);
+    }
+
+    /// Builds the workload from its own `derive_seed(.workload, 1)` stream (lane 0 is the
+    /// seeded `Proposals`).
+    fn workload_start(simulation: *Simulation, gpa: Allocator, options: *const Options) !void {
+        const seed = prng_module.derive_seed(options.seed, .workload, 1);
+        try simulation.workload.init(gpa, options.workload, options.history_ops_max, Prng.init(seed));
     }
 
     /// Refuses fault and proposal settings that could never run, before `init` allocates.
@@ -370,6 +400,7 @@ pub const Simulation = struct {
         assert(simulation.options.nodes_count <= nodes_max);
         const nodes = simulation.nodes[0..simulation.options.nodes_count];
         for (nodes) |*sim_node| sim_node.deinit(io, gpa);
+        simulation.workload.deinit(gpa);
         simulation.checker.deinit(gpa);
         simulation.network.deinit(gpa);
         simulation.* = undefined;
@@ -492,6 +523,7 @@ pub const Simulation = struct {
             .truncates = simulation.truncates_total(),
             .partitions = simulation.partitions,
             .proposed = simulation.proposed,
+            .workload = simulation.workload.stats(),
             .network = simulation.network.stats(),
             .digest = simulation.digest(),
         };
@@ -935,13 +967,14 @@ fn fault_of(plant: Plant) Network.Fault {
         .forge_votes => .forge_votes,
         .flip_data => .flip_data,
         .lose_synced_hard_state => .none,
+        .ack_uncommitted => .none,
     };
 }
 
 /// The store fault a `Plant` stands for; the other plants leave the store honest.
 fn store_fault_of(plant: Plant) CrashStore.Fault {
     return switch (plant) {
-        .none, .forge_votes, .flip_data => .none,
+        .none, .forge_votes, .flip_data, .ack_uncommitted => .none,
         .lose_synced_hard_state => .lose_synced_hard_state,
     };
 }
