@@ -7,7 +7,7 @@
 //!   - `sim/simulation.zig`: plan 004 item 4 (event loop; landed)
 //!   - `sim/crash_store.zig`: plan 004 item 5 (crash and restart; landed)
 //!   - `sim/linearizability.zig`: plan 004 item 9 (history checker; landed)
-//!   - `sim/workload.zig`: planned
+//!   - `sim/workload.zig`: plan 004 item 10 (KV workload; landed)
 //!
 //! Status: partial. Public declarations are added as plan 004 items land.
 
@@ -20,12 +20,15 @@ pub const crash_store = @import("sim/crash_store.zig");
 pub const invariants = @import("sim/invariants.zig");
 pub const simulation = @import("sim/simulation.zig");
 pub const linearizability = @import("sim/linearizability.zig");
+pub const workload = @import("sim/workload.zig");
 pub const Prng = prng.Prng;
 pub const VirtualClock = clock.VirtualClock;
 pub const Network = network.Network;
 pub const CrashStore = crash_store.CrashStore;
 pub const Checker = invariants.Checker;
 pub const HistoryChecker = linearizability.HistoryChecker;
+pub const Workload = workload.Workload;
+pub const KvStateMachine = workload.KvStateMachine;
 pub const Simulation = simulation.Simulation;
 pub const Options = simulation.Options;
 pub const Report = simulation.Report;
@@ -63,4 +66,8 @@ test {
     _ = @import("sim/linearizability_test.zig");
     _ = @import("sim/linearizability_limits_test.zig");
     _ = @import("sim/linearizability_model_test.zig");
+    // Plan 004 item 10: the KV workload.
+    _ = @import("sim/workload_test.zig");
+    _ = @import("sim/workload_model_test.zig");
+    _ = @import("sim/simulation_workload_test.zig");
 }

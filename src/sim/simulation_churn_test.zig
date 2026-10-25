@@ -75,6 +75,11 @@ fn churny(seed: u64, plant: Plant) Options {
     return options;
 }
 
+/// Every committed index is a seeded proposal, a workload command or a leader's term entry.
+fn committed_bound(stats: Stats) u64 {
+    return stats.proposed + stats.workload.ops_invoked + stats.leader_terms;
+}
+
 fn run(seed: u64, plant: Plant, report: *Report) Error!Stats {
     return simulation_module.run_seed(io, gpa, &churny(seed, plant), duration_ms, report);
 }
@@ -105,7 +110,7 @@ test "churn: 500 seeds of 3 and 5 nodes keep every safety property and the run i
         proposing += @intFromBool(stats.proposed > 0);
         applied_total += stats.applied;
         try testing.expectEqual(@as(u32, 0), stats.crashes + stats.restarts); // Crash-free.
-        try testing.expect(stats.committed_max <= stats.proposed + stats.leader_terms);
+        try testing.expect(stats.committed_max <= committed_bound(stats));
     }
     // Progress: elections happen, entries commit and apply.
     try testing.expect(led * 100 >= seeds_count * floor_led_percent);
@@ -379,7 +384,8 @@ test "init: cuts need fault draws, a zero fault interval with cuts on is refused
 test "init: proposal data_bytes is 1..entry_bytes_max when enabled, 0 interval disables" {
     var options = churny(64, .none);
     const bytes_max = options.raft.message_limits.entry_bytes_max;
-    try testing.expectEqual(@as(u32, 8), bytes_max); // The sweep preset; the bounds below follow.
+    // The sweep preset: room for one 24-byte KV command; the bounds below follow.
+    try testing.expectEqual(@as(u32, 24), bytes_max);
     options.proposals.data_bytes = 0;
     try expect_init_error(options, error.ProposalBytesInvalid);
     options.proposals.data_bytes = 1;
@@ -448,7 +454,7 @@ const Model = struct {
         try testing.expect(stats.truncates - before.truncates <= 1); // One receive truncates once.
         try testing.expect(stats.proposed - before.proposed <= 1);
         try testing.expectEqual(@as(u32, 0), stats.crashes);
-        try testing.expect(stats.committed_max <= stats.proposed + stats.leader_terms);
+        try testing.expect(stats.committed_max <= committed_bound(stats));
         try testing.expect(stats.applied <= model.nodes_count * stats.committed_max);
 
         const now_cut = try model.isolated(simulation);
