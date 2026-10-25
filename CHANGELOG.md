@@ -14,6 +14,12 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- `sim/workload.zig` (plan 004 item 10): `Workload` and `KvStateMachine`. Clients invoke `put`/`get`
+  commands through the log; an operation completes when the proposer applies it and stays pending
+  when the proposer crashes or loses leadership. `Simulation` runs the workload as `command`
+  events, `Options.sweep` turns it on, `run_seed` checks linearizability, and the planted
+  `ack_uncommitted` fault (a put acked before it commits) fails the sweep with `Linearizability`.
+
 - `sim/linearizability.zig` (plan 004 item 9): `HistoryChecker`, a Wing–Gong search over a
   per-key register model (split per key, explicit stack, no recursion, allocation in `init`
   only). Pending puts may or may not take effect; a history over `history_ops_max` returns

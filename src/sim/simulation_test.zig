@@ -433,6 +433,7 @@ test "simulation: TermsExhausted is returned when a leader's term passes terms_m
 test "simulation: propose returns ProposeNotLeader, ProposeTooLarge and ProposeLogFull" {
     var options = fx.sim_quiet(14, 3);
     options.raft.log_entries_max = 4;
+    options.raft.message_limits.entry_bytes_max = 8; // The preset's is a KV command's size.
     options.raft.log_bytes_max = 4 * 8;
     var simulation: Simulation = undefined;
     try simulation.init(io, gpa, &options);
