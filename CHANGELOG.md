@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-27
+
 ### Changed
 
 - Tiger Style baseline re-measured over Phase 3 (plan 004 item 11); README status and the `sim`
