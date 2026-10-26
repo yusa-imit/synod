@@ -8,8 +8,12 @@
 //!
 //! State machine: a register file of `keys_count` registers (initially 0). Every applied entry
 //! leaves one `Applied` record, drained by the simulation after the event. A no-op, a
-//! `conf_change`, an undecodable entry and a key outside the table are recorded with
-//! `command = null`: the typed "bad key" outcome, never handed to the history checker.
+//! `conf_change` and any entry of another shape (seeded proposal junk) are recorded with
+//! `command = null`: foreign, never handed to the history checker. A `normal` entry that claims
+//! to be a command (`command_bytes` long, starting with `"kv"`) and fails to decode, names a key
+//! outside the table or puts 0 is corrupt: recorded with `corrupt = true`, state untouched, and
+//! `KvStateMachine.check_invariants` and `Workload.applied` return their invariant error for it,
+//! so the simulator reports the seed instead of counting it as a pending operation.
 //!
 //! Workload: clients with one operation outstanding each. An operation is invoked at a
 //! successful propose and completed when its proposer applies the same entry at the index it
@@ -106,10 +110,12 @@ pub const KvStateMachine = struct {
     pub const Applied = struct {
         index: Index,
         entry_fingerprint: u64,
-        /// Null for a no-op, a `conf_change`, an undecodable entry or a key >= `keys_count`.
+        /// Null for a foreign entry (no-op, `conf_change`, other shapes) and a corrupt one.
         command: ?Command,
         /// put: the stored value; get: the current value (0 = never written); null command: 0.
         result: u64,
+        /// The entry claimed to be a command and is not a valid one: see the module doc.
+        corrupt: bool,
     };
 
     pub const Options = struct { keys_count: u16, applied_max: u32 };
@@ -155,16 +161,22 @@ pub const KvStateMachine = struct {
             .entry_fingerprint = invariants.fingerprint(entry),
             .command = null,
             .result = 0,
+            .corrupt = false,
         };
-        if (command_of(entry, kv.values.len)) |command| {
-            record.command = command;
-            record.result = kv.execute(&command);
+        switch (parse(entry, kv.values.len)) {
+            .foreign => {},
+            .corrupt => record.corrupt = true,
+            .command => |command| {
+                record.command = command;
+                record.result = kv.execute(&command);
+            },
         }
         kv.records[kv.len] = record;
         kv.len += 1;
     }
 
-    /// Runs `command` on its register and returns the result a record carries.
+    /// Runs `command` on its register and returns the result a record carries. Preconditions:
+    /// `parse` accepted it: the key is in the table and a put's value is not 0.
     fn execute(kv: *KvStateMachine, command: *const Command) u64 {
         assert(command.key < kv.values.len);
         switch (command.kind) {
@@ -177,7 +189,7 @@ pub const KvStateMachine = struct {
         }
     }
 
-    /// Phase 3 takes no snapshots (ADR-008, to be amended): a call is a harness fault.
+    /// Phase 3 takes no snapshots (ADR-008 amendment): a call is a harness fault.
     pub fn snapshot(
         kv: *KvStateMachine,
         writer: *Io.Writer,
@@ -187,7 +199,7 @@ pub const KvStateMachine = struct {
         return error.StateMachineFailed;
     }
 
-    /// Phase 3 restores no snapshots (ADR-008, to be amended): a call is a harness fault.
+    /// Phase 3 restores no snapshots (ADR-008 amendment): a call is a harness fault.
     pub fn restore(
         kv: *KvStateMachine,
         reader: *Io.Reader,
@@ -223,18 +235,33 @@ pub const KvStateMachine = struct {
         for (kv.records[0..kv.len]) |record| {
             if (record.index == Index.zero) return error.KvInvariant;
 
+            if (record.corrupt) return error.KvInvariant;
+
             const command = record.command orelse continue;
             if (command.key >= kv.values.len) return error.KvInvariant;
         }
     }
 };
 
-/// The command inside `entry`, or null when the entry carries none: not a `normal` entry, an
-/// empty no-op, undecodable bytes, or a key outside `keys_count`.
-fn command_of(entry: *const Entry, keys_count: usize) ?Command {
+/// What a log entry is to the state machine.
+const Parsed = union(enum) {
+    /// Not a workload entry: a no-op, a `conf_change`, or bytes of another shape.
+    foreign,
+    command: Command,
+    /// Claims to be a command (`command_bytes` long, starting with `"kv"`) but is not valid.
+    corrupt,
+};
+
+/// Classifies `entry`; a command it returns has a key below `keys_count` and, for a put, a
+/// value other than 0.
+fn parse(entry: *const Entry, keys_count: usize) Parsed {
     assert(keys_count > 0);
     assert(keys_count <= std.math.maxInt(u16) + 1);
-    if (entry.kind != .normal) return null;
+    if (entry.kind != .normal) return .foreign;
+
+    if (entry.data.len != command_bytes) return .foreign;
+
+    if (!std.mem.startsWith(u8, entry.data, "kv")) return .foreign;
 
     const command = decode(entry.data) catch |err| switch (err) {
         error.CommandLength,
@@ -242,11 +269,14 @@ fn command_of(entry: *const Entry, keys_count: usize) ?Command {
         error.CommandVersion,
         error.CommandKind,
         error.CommandChecksum,
-        => return null,
+        => return .corrupt,
     };
-    if (command.key >= keys_count) return null;
+    if (command.key >= keys_count) return .corrupt;
 
-    return command;
+    // `encode` accepts 0, but a put never writes the initial register value.
+    if (command.kind == .put and command.value == 0) return .corrupt;
+
+    return .{ .command = command };
 }
 
 pub const Invocation = struct { node_index: u8, log_index: Index, event_index: u64 };
@@ -443,15 +473,19 @@ pub const Workload = struct {
         assert(command.op_id < workload.op_id_next);
     }
 
-    /// Node `node_index` applied `record` during event `event_index`.
+    /// Node `node_index` applied `record` during event `event_index`. The record comes from
+    /// the log, so a corrupt one, an own entry naming another client and an apply at or before
+    /// the invoke event are `WorkloadInvariant`, not assertions.
     pub fn applied(
         workload: *Workload,
         node_index: u8,
         record: *const KvStateMachine.Applied,
         event_index: u64,
-    ) void {
+    ) InvariantError!void {
         assert(record.index != Index.zero);
         assert(workload.len <= workload.history_ops_max);
+        if (record.corrupt) return error.WorkloadInvariant;
+
         for (workload.slots) |*slot| {
             if (slot.state != .busy) continue;
 
@@ -467,8 +501,10 @@ pub const Workload = struct {
                 continue;
             }
             const op = &workload.ops[slot.op];
-            assert(command.client_index == op.client_index);
-            assert(event_index > op.invoke_event);
+            if (command.client_index != op.client_index) return error.WorkloadInvariant;
+
+            if (event_index <= op.invoke_event) return error.WorkloadInvariant;
+
             op.complete_event = event_index;
             if (op.kind == .get) op.value = record.result;
             workload.completed += 1;

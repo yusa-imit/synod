@@ -409,9 +409,16 @@ pub const Simulation = struct {
         options: *const Options,
     ) Allocator.Error!void {
         const seed = prng_module.derive_seed(options.seed, .workload, 1);
+        const spec = workload_spec(options);
+        try simulation.workload.init(gpa, spec, options.history_ops_max, Prng.init(seed));
+    }
+
+    /// The workload settings in effect: `options.workload` with the `ack_uncommitted` plant
+    /// turned into the workload's fault. `options_validate` and `workload_start` share it.
+    fn workload_spec(options: *const Options) Workload.Options {
         var spec = options.workload;
         if (options.plant == .ack_uncommitted) spec.fault = .ack_uncommitted;
-        try simulation.workload.init(gpa, spec, options.history_ops_max, Prng.init(seed));
+        return spec;
     }
 
     /// Refuses fault and proposal settings that could never run, before `init` allocates.
@@ -426,7 +433,7 @@ pub const Simulation = struct {
             if (faults.partition_ms_max == 0) return error.PartitionDurationInvalid;
         }
         try workload_hooks.validate(
-            options.workload,
+            workload_spec(options),
             options.history_ops_max,
             options.search_steps_max,
             options.raft.message_limits.entry_bytes_max,
@@ -918,7 +925,7 @@ pub const Simulation = struct {
         try kv.check_invariants();
         for (kv.drain()) |*record| {
             try simulation.checker.applied(slot, record.index, record.entry_fingerprint);
-            simulation.workload.applied(slot, record, simulation.events);
+            try simulation.workload.applied(slot, record, simulation.events);
             simulation.applied_total += 1;
             const words = [3]u64{ slot, @intFromEnum(record.index), record.entry_fingerprint };
             simulation.applied_digest = std.hash.Wyhash.hash(

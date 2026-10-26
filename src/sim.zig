@@ -70,4 +70,7 @@ test {
     _ = @import("sim/workload_test.zig");
     _ = @import("sim/workload_model_test.zig");
     _ = @import("sim/simulation_workload_test.zig");
+    // The review findings of item 10: workload validation, invariants, corrupt entries.
+    _ = @import("sim/workload_hooks_test.zig");
+    _ = @import("sim/workload_review_test.zig");
 }

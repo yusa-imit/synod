@@ -39,12 +39,14 @@ const Expected = struct {
     entry_fingerprint: u64,
     command: ?Command,
     result: u64,
+    corrupt: bool,
 };
 
 const KvTotals = struct {
     puts: u32 = 0,
     gets_nonzero: u32 = 0,
     refused: u32 = 0,
+    corrupt: u32 = 0,
     resets: u32 = 0,
     drains: u32 = 0,
 };
@@ -57,11 +59,13 @@ fn expect_drained(kv: *workload_module.KvStateMachine, expected: []const Expecte
         try testing.expectEqual(want.entry_fingerprint, record.entry_fingerprint);
         try testing.expectEqual(want.command, record.command);
         try testing.expectEqual(want.result, record.result);
+        try testing.expectEqual(want.corrupt, record.corrupt);
     }
 }
 
-/// One random entry and the command a correct machine takes from it (null: it must refuse).
-const Drawn = struct { entry: types.Entry, want: ?Command };
+/// One random entry and the command a correct machine takes from it (null: it must refuse),
+/// and whether the refusal is a corrupt command (it claims to be one) rather than a foreign entry.
+const Drawn = struct { entry: types.Entry, want: ?Command, corrupt: bool };
 
 /// Builds a random entry whose bytes live in `storage`: 60% valid in-range commands, the rest
 /// refusals of every kind (key out of range, no-op, membership entry, corrupt, wrong size).
@@ -86,10 +90,12 @@ fn draw_entry(
     var kind: types.EntryKind = .normal;
     var len: usize = command_bytes;
     var want: ?Command = null;
+    var corrupt = false;
     if (roll < 60) {
         want = command;
     } else if (roll < 70) {
         totals.refused += 1;
+        corrupt = true; // a valid command whose key is outside the table
     } else if (roll < 78) {
         len = 0; // a new leader's no-op
     } else if (roll < 88) {
@@ -97,12 +103,15 @@ fn draw_entry(
     } else if (roll < 94) {
         const bit = prng.uint_less_than(command_bytes * 8);
         storage[bit / 8] ^= @as(u8, 1) << @intCast(bit % 8);
+        corrupt = bit / 8 >= 2; // a flip in the magic leaves bytes that claim nothing
     } else {
         len = @intCast(prng.uint_less_than(command_bytes + 16));
         if (len == command_bytes) len += 1;
         for (storage[0..len]) |*byte| byte.* = @truncate(prng.next_u64());
     }
-    return .{ .entry = fx.raw_entry(index, kind, storage[0..len]), .want = want };
+    if (corrupt) totals.corrupt += 1;
+    const entry = fx.raw_entry(index, kind, storage[0..len]);
+    return .{ .entry = entry, .want = want, .corrupt = corrupt };
 }
 
 /// The reference register file: applies `want` and returns the result a record must carry.
@@ -132,17 +141,20 @@ fn kv_run(seed: u64, totals: *KvTotals) !void {
     var registers = [_]u64{0} ** 8;
     var undrained: [applied_max]Expected = undefined;
     var undrained_len: usize = 0;
+    var undrained_corrupt: u32 = 0;
     var index: u64 = 1;
     for (0..steps_count) |_| {
         if (undrained_len == applied_max or prng.chance(25)) {
             try expect_drained(&rig.kv, undrained[0..undrained_len]);
             undrained_len = 0;
+            undrained_corrupt = 0;
             totals.drains += 1;
         }
         if (prng.chance(3)) {
             rig.kv.reset();
             registers = [_]u64{0} ** 8;
             undrained_len = 0; // the machine is volatile: undrained records are void
+            undrained_corrupt = 0;
             totals.resets += 1;
             try rig.kv.check_invariants();
             continue;
@@ -155,10 +167,17 @@ fn kv_run(seed: u64, totals: *KvTotals) !void {
             .entry_fingerprint = invariants.fingerprint(&drawn.entry),
             .command = drawn.want,
             .result = model_apply(&registers, drawn.want, totals),
+            .corrupt = drawn.corrupt,
         };
         undrained_len += 1;
+        undrained_corrupt += @intFromBool(drawn.corrupt);
         try rig.kv.apply(&drawn.entry);
-        try rig.kv.check_invariants();
+        // A corrupt record stays an invariant violation until it is drained.
+        if (undrained_corrupt > 0) {
+            try testing.expectError(error.KvInvariant, rig.kv.check_invariants());
+        } else {
+            try rig.kv.check_invariants();
+        }
     }
     try expect_drained(&rig.kv, undrained[0..undrained_len]);
 }
@@ -170,6 +189,7 @@ test "kv model: seeded streams of commands, junk, drains and restarts match the 
     try testing.expect(totals.puts > seeds_count * 20);
     try testing.expect(totals.gets_nonzero > seeds_count * 5);
     try testing.expect(totals.refused > seeds_count * 5);
+    try testing.expect(totals.corrupt > seeds_count * 5);
     try testing.expect(totals.resets > seeds_count);
     try testing.expect(totals.drains > seeds_count * 10);
 }
@@ -332,14 +352,14 @@ fn apply_step(
     prng: *Prng,
     state: *Clock,
     totals: *WorkloadTotals,
-) void {
+) !void {
     const op = model.pick_open(prng) orelse return;
     state.event += 1;
     const result = prng.uint_less_than(5);
     switch (prng.uint_less_than(100)) {
         0...54 => { // the proposer applies its own entry
             const record = fx.record_of(op.log_index, op.command, result);
-            rig.workload.applied(op.node, &record, state.event);
+            try rig.workload.applied(op.node, &record, state.event);
             op.state = .done;
             op.complete = state.event;
             op.result = result;
@@ -349,24 +369,24 @@ fn apply_step(
             var rival = op.command;
             rival.op_id +%= 1;
             const record = fx.record_of(op.log_index, rival, result);
-            rig.workload.applied(op.node, &record, state.event);
+            try rig.workload.applied(op.node, &record, state.event);
             model.retire(op);
             totals.lost_entry += 1;
         },
         70...79 => { // a no-op won the index
             const record = fx.record_of(op.log_index, null, 0);
-            rig.workload.applied(op.node, &record, state.event);
+            try rig.workload.applied(op.node, &record, state.event);
             model.retire(op);
             totals.lost_entry += 1;
         },
         80...89 => { // a follower applies it: no change
             const record = fx.record_of(op.log_index, op.command, result);
-            rig.workload.applied((op.node + 1) % 4, &record, state.event);
+            try rig.workload.applied((op.node + 1) % 4, &record, state.event);
             totals.no_change_applies += 1;
         },
         else => { // the proposer applies some other index: no change
             const record = fx.record_of(op.log_index + 1000, op.command, result);
-            rig.workload.applied(op.node, &record, state.event);
+            try rig.workload.applied(op.node, &record, state.event);
             totals.no_change_applies += 1;
         },
     }
@@ -399,7 +419,7 @@ fn workload_run(seed: u64, totals: *WorkloadTotals) !void {
     for (0..steps_count) |_| {
         switch (prng.uint_less_than(100)) {
             0...44 => try draw_step(&rig, &model, &prng, options, history_ops_max, &state, totals),
-            45...84 => apply_step(&rig, &model, &prng, &state, totals),
+            45...84 => try apply_step(&rig, &model, &prng, &state, totals),
             else => {
                 const node: u8 = @intCast(prng.uint_less_than(4));
                 rig.workload.crashed(node);
