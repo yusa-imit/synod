@@ -28,10 +28,10 @@
 
 ## Phase 3 — Simulation Harness
 
-- [ ] 3A `sim/clock.zig`, `sim/network.zig`, `sim/simulation.zig`
-- [ ] 3B `sim/invariants.zig` — 5 safety properties
-- [ ] 3C seeded CI test step (`zig build sim -Dseeds=N`)
-- [ ] 3D `sim/linearizability.zig`
+- [x] 3A `sim/clock.zig`, `sim/network.zig`, `sim/simulation.zig`
+- [x] 3B `sim/invariants.zig` — 5 safety properties
+- [x] 3C seeded CI test step (`zig build sim -Dseeds=N`)
+- [x] 3D `sim/linearizability.zig`
 
 ## Phase 4 — Snapshot & Membership
 
