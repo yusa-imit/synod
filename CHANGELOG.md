@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Tiger Style baseline re-measured over Phase 3 (plan 004 item 11); README status and the `sim`
+  module row now match the code. `zig build tidy` is clean and 860 tests pass (`zig build test`
+  takes about 105 s, not the planned 10 s, because the seeded sim and model tests dominate).
+  Non-test lines / `assert` calls / longest function: `sim/simulation.zig` 870 / 71 / 68
+  (`init`), `sim/network.zig` 419 / 73 / 50 (`init`), `sim/workload.zig` 408 / 47 / 38 (`init`),
+  `sim/crash_store.zig` 304 / 18 / 39 (`init`), `sim/invariants.zig` 282 / 44 / 39 (`init`),
+  `sim/linearizability.zig` 173 / 21 / 45 (`search_key`), `sim/workload_hooks.zig` 94 / 5 / 46
+  (`command_event`), `sim/prng.zig` 47 / 6 / 7, `sim/sim_node.zig` 32 / 2 / 9, `sim/clock.zig`
+  21 / 2 / 6. No function exceeds 70 lines, so `tidy_baseline.txt` stays absent. Counts exclude
+  blank lines, comments and `test` blocks; the longest function is measured brace to brace.
+
 ### Fixed
 
 - `Simulation` review findings (plan 004 items 4 and 6): `init` returns `CrashPercentInvalid`,

@@ -16,12 +16,14 @@ cluster/sentinel이 이 위로 이식될 예정이지만, 아래 "Status"에 나
 
 ## Status
 
-**Phase 2 implemented** — `types`, `interfaces`, `log`, `store`, the Raft node (`raft`: PreVote
-election, log replication, commit and apply) and `driver` are real, tested code. Snapshots,
-joint-consensus membership, ReadIndex and lease reads (Phase 4), SWIM `membership`, `detector`,
-`clock`, `sim`, and `adapters` are still stubs (`error.NotImplemented`). The design in this
-README and in `docs/PRD.md` is the target shape; treat synod as a pre-release consensus core
-until the v0.4.0 tag. `docs/plans/003-*.md` tracks the Phase 2 milestone.
+**Phase 3 implemented** — `types`, `interfaces`, `log`, `store`, the Raft node (`raft`: PreVote
+election, log replication, commit and apply), `driver` and the deterministic simulator `sim`
+(virtual clock and network, crash and restart, five safety invariants, a linearizability
+checker, `zig build sim -Dseeds=N`) are real, tested code. Snapshots, joint-consensus
+membership, ReadIndex and lease reads (Phase 4), SWIM `membership`, `detector`, `clock`, and
+`adapters` are still stubs (`error.NotImplemented`). The design in this README and in
+`docs/PRD.md` is the target shape; treat synod as a pre-release consensus core until the
+v0.5.0 tag. `docs/plans/004-*.md` tracks the Phase 3 milestone.
 
 ## Modules
 
@@ -36,7 +38,7 @@ until the v0.4.0 tag. `docs/plans/003-*.md` tracks the Phase 2 milestone.
 | `synod.detector` | φ-accrual failure detector. | planned |
 | `synod.clock` | Hybrid logical clock, Lamport clock, monotonic Clock interface. | planned |
 | `synod.store` | In-memory LogStore for tests and simulation. | implemented |
-| `synod.sim` | Deterministic simulation: virtual clock, virtual network (delay, loss, partition, reorder), scenarios, Raft safety invariants, linearizability checker. | planned |
+| `synod.sim` | Deterministic simulation: virtual clock, virtual network (delay, loss, partition, reorder), scenarios, Raft safety invariants, linearizability checker. | implemented |
 | `synod.adapters` | Opt-in adapters: sirocco Transport, strata LogStore. | planned |
 
 ## Install
