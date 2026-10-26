@@ -65,21 +65,21 @@ it into the public `sim` module (PRD §4.5) instead of growing a second harness.
       `zig build sim -Dseeds=100000` (PRD §4.5), seed window rotated by date. Why separate: its
       own failure mode (runtime cap). *Verify:* `gh run list --workflow sim-nightly.yml` success.
       *Failing test first:* a dispatch with item 7's planted fault goes red. `blocked_by: none`
-- [ ] 9. **3D-i `sim/linearizability.zig` — checker.** Wing–Gong/Porcupine search over a KV
+- [x] 9. **3D-i `sim/linearizability.zig` — checker.** Wing–Gong/Porcupine search over a KV
       model, split per key (P-compositionality); explicit stack, no recursion; pending
       (indeterminate) ops allowed; histories over `history_ops_max` are refused and a search
       past `search_steps_max` returns `error.CheckInconclusive`, never "pass". *Failing test
       first:* Porcupine-paper histories (linearizable, not, with pending ops) and an
       over-budget one. `blocked_by: none`
-- [ ] 10. **3D-ii KV workload in the sim.** Clients propose `put`/`get` entries (reads go through
+- [x] 10. **3D-ii KV workload in the sim.** Clients propose `put`/`get` entries (reads go through
       the log: ReadIndex is Phase 4); invoke at propose, complete at the proposer's apply,
       pending if it crashed or lost leadership; checked by item 9 at `run_until` end.
       *Failing test first:* a planted harness fault that acks an uncommitted `put` fails
       `Linearizability` with its seed; 1000 seeds pass under `zig build sim`. `blocked_by: none`
-- [ ] 11. **Re-measure Tiger Style baseline.** Assert density, longest function, tidy numbers for
+- [x] 11. **Re-measure Tiger Style baseline.** Assert density, longest function, tidy numbers for
       `src/sim/*`; flip README's sim row, tick Phase 3 (3A–3D) in `docs/plans/000-inherited.md`.
       Docs, no test. *Verify:* `zig build tidy` green; table in `STATE.md`. `blocked_by: none`
-- [ ] 12. **Release v0.5.0.** MINOR bump in `build.zig.zon`, CHANGELOG, README install tag,
+- [x] 12. **Release v0.5.0.** MINOR bump in `build.zig.zon`, CHANGELOG, README install tag,
       annotated tag, GitHub release. Its test is the `REALM.md` gate: 0 test failures, 6 cross
       targets green, 0 open `bug` issues. *Verify:* `gh release view v0.5.0`; `zig fetch` of the
       tag resolves. `blocked_by: none`

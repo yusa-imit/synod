@@ -14,10 +14,10 @@
 
 ## Phase 1 — Core Types & Log
 
-- [ ] 1A `types.zig`
-- [ ] 1B `log.zig` + `validate()`
-- [ ] 1C `interfaces.zig` vtables
-- [ ] 1D `store/memory.zig`
+- [x] 1A `types.zig`
+- [x] 1B `log.zig` + `validate()`
+- [x] 1C `interfaces.zig` vtables
+- [x] 1D `store/memory.zig`
 
 ## Phase 2 — Raft Election & Replication
 
