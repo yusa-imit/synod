@@ -572,7 +572,7 @@ test "workload: a client has one operation outstanding, completion frees it" {
     try testing.expectEqual(@as(?Command, null), try rig.draw()); // and the draw is consumed
 
     const record = fx.record_of(2, first, 0);
-    rig.workload.applied(0, &record, 12);
+    try rig.workload.applied(0, &record, 12);
     const third = try rig.draw_some();
     try testing.expect(third.client_index != second.client_index); // that one is still busy
     try testing.expect(third.op_id != first.op_id);
@@ -599,7 +599,7 @@ test "workload: invoke and completion are recorded with their events" {
     try fx.expect_stats(&rig.workload, 1, 0, 1);
 
     const record = fx.record_of(7, command, command.value);
-    rig.workload.applied(2, &record, 104);
+    try rig.workload.applied(2, &record, 104);
     const done = rig.workload.history()[0];
     try testing.expectEqual(@as(?u64, 104), done.complete_event);
     try testing.expectEqual(command.value, done.value);
@@ -618,7 +618,7 @@ test "workload: a get completes with the value the proposer's state machine retu
         const command = try rig.draw_some();
         rig.workload.invoked(&command, fx.invocation(1, 5 + round, 10 + round * 10));
         const record = fx.record_of(5 + round, command, result);
-        rig.workload.applied(1, &record, 15 + round * 10);
+        try rig.workload.applied(1, &record, 15 + round * 10);
         const done = rig.workload.history()[round];
         try testing.expectEqual(result, done.value);
         try testing.expectEqual(@as(?u64, 15 + round * 10), done.complete_event);
@@ -636,17 +636,17 @@ test "workload: an apply on another node or at another index leaves the operatio
     const command = try rig.draw_some();
     rig.workload.invoked(&command, fx.invocation(0, 6, 10));
     const elsewhere = fx.record_of(6, command, 1);
-    rig.workload.applied(1, &elsewhere, 11); // a follower applied it: not the proposer
+    try rig.workload.applied(1, &elsewhere, 11); // a follower applied it: not the proposer
     const earlier = fx.record_of(5, command, 1);
-    rig.workload.applied(0, &earlier, 12);
+    try rig.workload.applied(0, &earlier, 12);
     const later = fx.record_of(7, command, 1);
-    rig.workload.applied(0, &later, 13);
+    try rig.workload.applied(0, &later, 13);
     try testing.expectEqual(@as(?u64, null), rig.workload.history()[0].complete_event);
     try testing.expectEqual(@as(u32, 0), rig.workload.stats().ops_completed);
     try testing.expectEqual(@as(?Command, null), try rig.draw()); // still busy
 
     const proposer = fx.record_of(6, command, 1);
-    rig.workload.applied(0, &proposer, 14);
+    try rig.workload.applied(0, &proposer, 14);
     try testing.expectEqual(@as(?u64, 14), rig.workload.history()[0].complete_event);
 }
 
@@ -662,7 +662,7 @@ test "workload: a different entry at the operation's index leaves it pending, cl
     var rival = first;
     rival.op_id = first.op_id +% 1; // another operation's entry won index 5
     const lost = fx.record_of(5, rival, 9);
-    rig.workload.applied(0, &lost, 12);
+    try rig.workload.applied(0, &lost, 12);
     try testing.expectEqual(@as(?u64, null), rig.workload.history()[0].complete_event);
     try fx.expect_stats(&rig.workload, 1, 0, 1);
 
@@ -684,7 +684,7 @@ test "workload: a no-op or membership entry at the operation's index leaves it p
     const command = try rig.draw_some();
     rig.workload.invoked(&command, fx.invocation(0, 3, 10));
     const no_command = fx.record_of(3, null, 0);
-    rig.workload.applied(0, &no_command, 11);
+    try rig.workload.applied(0, &no_command, 11);
     try testing.expectEqual(@as(?u64, null), rig.workload.history()[0].complete_event);
     const next = try rig.draw_some();
     try testing.expect(next.client_index != command.client_index);
@@ -708,9 +708,9 @@ test "workload: a crashed proposer's operations stay pending, other nodes' opera
 
     // A restarted node 0 re-applying the very entry does not resurrect the operation.
     const reapplied = fx.record_of(4, doomed, 3);
-    rig.workload.applied(0, &reapplied, 20);
+    try rig.workload.applied(0, &reapplied, 20);
     const done = fx.record_of(5, survivor, 3);
-    rig.workload.applied(1, &done, 21);
+    try rig.workload.applied(1, &done, 21);
 
     const history = rig.workload.history();
     try testing.expectEqual(@as(usize, 2), history.len);
@@ -741,7 +741,7 @@ test "workload: a full history stops commands and completion does not make room"
     try testing.expectEqual(@as(usize, 3), rig.workload.history().len);
 
     const record = fx.record_of(2, commands[0], 0);
-    rig.workload.applied(0, &record, 20);
+    try rig.workload.applied(0, &record, 20);
     try testing.expectEqual(@as(u32, 1), rig.workload.stats().ops_completed);
     try testing.expectEqual(@as(u32, 3), rig.workload.stats().ops_invoked);
     try testing.expectEqual(@as(?u64, null), rig.workload.next_due_ms());
@@ -787,7 +787,7 @@ test "workload: ack_uncommitted completes a put at invoke, after its invoke even
 
     // The real apply, later, changes nothing about the lie.
     const record = fx.record_of(3, command, command.value);
-    rig.workload.applied(0, &record, 90);
+    try rig.workload.applied(0, &record, 90);
     try testing.expectEqual(op, rig.workload.history()[0]);
     try testing.expectEqual(@as(u32, 1), rig.workload.stats().ops_completed);
     try rig.workload.check_invariants();
@@ -832,7 +832,7 @@ test "workload: a scripted correct run passes the checker, a forged read fails i
         if (command.kind == .put) server[command.key] = command.value;
         const record = fx.record_of(index, command, server[command.key]);
         event += 1;
-        rig.workload.applied(0, &record, event);
+        try rig.workload.applied(0, &record, event);
     }
     try fx.expect_stats(&rig.workload, 40, 36, 4);
 

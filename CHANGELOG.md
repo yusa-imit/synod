@@ -7,6 +7,15 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Fixed
 
+- KV workload review findings (plan 004 item 10): a put of 0, a command with a key outside the
+  table and any other entry that claims to be a command but fails to decode are recorded as
+  corrupt (`Applied.corrupt`) and fail the run with `KvInvariant` / `WorkloadInvariant` and its
+  seed instead of asserting or counting as a pending operation; `Workload.applied` returns
+  `WorkloadInvariant` for a client or event-order mismatch; `WorkloadInvalid` is tested for every
+  branch and also refuses the `ack_uncommitted` plant without clients; the propose switch lists
+  its errors; ADR-008 documents `workload_hooks`, the invariant errors, `Options` by value, the
+  workload's PRNG lane 1 and the missing KV snapshot stream.
+
 - `Simulation` review findings (plan 004 items 4 and 6): `init` returns `CrashPercentInvalid`,
   `TornPercentInvalid` and `DownDurationInvalid` instead of asserting mid-run; a proposal of
   more than 8 bytes no longer overruns its buffer; the proposal switch names `ProposeTooLarge`;

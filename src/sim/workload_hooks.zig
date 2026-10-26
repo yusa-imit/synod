@@ -18,6 +18,7 @@ const raft = @import("../raft.zig");
 const types = @import("../types.zig");
 const prng_module = @import("prng.zig");
 const sim_node_module = @import("sim_node.zig");
+const simulation_module = @import("simulation.zig");
 const workload_module = @import("workload.zig");
 
 const Driver = driver_module.Driver;
@@ -33,17 +34,21 @@ pub const ProposeFailure = raft.ProposeError || Driver.Fault;
 
 /// How one command event went.
 pub const Outcome = union(enum) {
-    /// Every client was busy, or no node believes it leads: nothing was proposed.
+    /// Every client was busy: no command was drawn and nothing was proposed. (No node believing
+    /// it leads is `rejected`: the command was drawn and is refused without a record.)
     idle,
     /// A leader accepted the command: its operation is invoked.
     proposed,
-    /// The leader refused it (`ProposeNotLeader`, `ProposeLogFull`): no record.
+    /// No leader to take it, or the leader refused it (`ProposeNotLeader`, `ProposeLogFull`):
+    /// no record.
     rejected,
     /// The node `slot` failed with `err`: the caller decides whether that is a crash.
     failed: struct { slot: u8, err: ProposeFailure },
 };
 
 /// Refuses workload settings that could never run, before the simulation allocates.
+/// `spec.fault` is the effective fault: the `ack_uncommitted` plant already applied. A lie needs
+/// a client to tell it to, so `ack_uncommitted` without clients is refused too.
 pub fn validate(
     spec: Workload.Options,
     history_ops_max: u32,
@@ -58,8 +63,11 @@ pub fn validate(
 
     if (spec.put_percent > 100) return error.WorkloadInvalid;
 
-    if (spec.clients_count == 0) return;
+    if (spec.clients_count == 0) {
+        if (spec.fault == .ack_uncommitted) return error.WorkloadInvalid;
 
+        return;
+    }
     if (spec.op_interval_ms_max == 0) return error.WorkloadInvalid;
 
     if (entry_bytes_max < workload_module.command_bytes) return error.WorkloadInvalid;
@@ -76,7 +84,7 @@ pub fn command_event(
     now_ms: u64,
     event_index: u64,
 ) Outcome {
-    var leaders: [8]u8 = undefined;
+    var leaders: [simulation_module.nodes_max]u8 = undefined;
     assert(nodes.len >= 2);
     assert(nodes.len <= leaders.len);
     assert(event_index > 0);
@@ -104,7 +112,17 @@ pub fn command_event(
             workload.rejected(&command);
             return .rejected;
         },
-        else => {
+        // Refused before the node logged anything (validation bounds the command by the entry
+        // size, so this is a harness bug): no record, and the caller returns the error.
+        error.ProposeTooLarge => {
+            workload.rejected(&command);
+            return .{ .failed = .{ .slot = slot, .err = err } };
+        },
+        // The node may have logged the command before the store failed: see the module doc.
+        error.StoreFull,
+        error.StoreIoFailed,
+        error.StateMachineFailed,
+        => {
             const logged: Index = @enumFromInt(@intFromEnum(last_index) + 1);
             invoke(workload, &command, slot, logged, event_index);
             return .{ .failed = .{ .slot = slot, .err = err } };

@@ -53,6 +53,7 @@ pub fn record_of(index: u64, command: ?Command, result: u64) Applied {
         .entry_fingerprint = index * 31 + 7,
         .command = command,
         .result = result,
+        .corrupt = false,
     };
 }
 

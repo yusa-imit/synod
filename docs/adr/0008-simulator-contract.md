@@ -24,9 +24,10 @@ simulation}.zig`. `src/sim.zig` re-exports the eight files as namespaces plus `S
 
 **Convention.** Each stateful type `T` below (`Network`, `CrashStore`, `Checker`,
 `HistoryChecker`, `KvStateMachine`, `Workload`) has `pub fn init(t: *T, gpa: Allocator,
-options: *const T.Options, <extra>) Allocator.Error!void` (`<extra>` noted per type) and
-`pub fn deinit(t: *T, gpa: Allocator) void`, allocates nothing after `init`, and adapts to an
-interface only through `pub fn as_<interface>(t: *T) <Interface>`.
+options: *const T.Options, <extra>) Allocator.Error!void` (`<extra>` noted per type; the
+exception is `KvStateMachine` and `Workload`, which take `Options` by value, see the item 10
+amendment) and `pub fn deinit(t: *T, gpa: Allocator) void`, allocates nothing after `init`,
+and adapts to an interface only through `pub fn as_<interface>(t: *T) <Interface>`.
 
 **Purity and `io`.** Item 2 adds to tidy `pub const sim_purity_dir = "src/sim/"`,
 `pub fn is_sim_purity_file(path: []const u8) bool` (also true for `src/sim.zig`) and
@@ -55,7 +56,8 @@ pub const Prng = struct { // SplitMix64
 ```
 
 `derive_seed = mix64(root_seed ^ mix64((stream << 32) | lane))`, `mix64` the SplitMix64
-finalizer. `network`, `faults`, `workload` use lane 0; node `i` in its `g`-th life uses
+finalizer. `network`, `faults`, `workload` use lane 0 (the `Workload` itself draws from
+`workload` lane 1, see the item 10 amendment); node `i` in its `g`-th life uses
 `(g << 8) | i` (`g < 2^24`, asserted): node 2's timer draws are identical in a 3- and a 5-node
 run, and a restart gets a fresh seed-determined stream. `std.Random` is banned in `src/sim/`:
 its algorithms are not pinned across Zig releases, and a nightly seed must replay after a
@@ -384,3 +386,45 @@ all); `std.Random` (unpinned across releases); a stored `io`; crashes only betwe
   `RestoreInconsistent` leaves the node down for good (the node refuses to start on corrupt
   state); an honest store returning it is a bug. Scripted `crash` keeps zero unsynced writes
   (nothing is unsynced between events); only seeded torn crashes lose data.
+- **Item 10 (KV workload review).**
+  - *`workload_hooks`.* The glue between `Simulation` and `Workload` is its own file,
+    `src/sim/workload_hooks.zig`, with four `pub` decls: `OptionsError = error{WorkloadInvalid}`,
+    `ProposeFailure = raft.ProposeError || Driver.Fault`, `Outcome = union(enum) { idle,
+    proposed, rejected, failed: struct { slot: u8, err: ProposeFailure } }` and `validate`
+    (workload settings) and `command_event` (one command event). `idle` means every client was
+    busy; no leader to take a drawn command is `rejected`. A command that fails in the store
+    after the node may have logged it is recorded as invoked before the failure is handed back
+    (a torn crash can leave the entry to commit later); `ProposeTooLarge` is `rejected` and
+    then returned, since the node logged nothing.
+  - *`WorkloadInvalid`.* `Simulation.init` (so `run_seed`) refuses, before it allocates:
+    `history_ops_max == 0`, `search_steps_max == 0`, `keys_count == 0`, `put_percent > 100`,
+    and, with `clients_count > 0`, `op_interval_ms_max == 0` or `entry_bytes_max <
+    command_bytes`. The `ack_uncommitted` plant with `clients_count == 0` is refused too: there
+    is no client to lie to. `Error` includes `workload_hooks.OptionsError`.
+  - *`Options` by value, lane 1.* `KvStateMachine.init(kv, gpa, options)` and
+    `Workload.init(workload, gpa, options, history_ops_max, prng)` take `Options` by value (a
+    few scalars; the `*const` convention above is for the large option structs).
+    `Simulation` builds the `Workload` from `derive_seed(root, .workload, 1)`; lane 0 stays the
+    seeded proposals and the command-event leader pick, so adding the workload reshuffles no
+    existing stream.
+  - *Corrupt entries.* A `normal` entry that claims to be a command (exactly `command_bytes`
+    bytes starting with `"kv"`) and then fails `decode`, names a key `>= keys_count` or puts 0
+    (`encode` accepts it) is corrupt, not absent. `Applied` gains `corrupt: bool`; the record has
+    `command = null`, `result = 0`, and the state is untouched. A no-op, a `conf_change` and any
+    other shape (seeded proposal junk) are foreign: `command = null`, `corrupt = false`. The
+    record never asserts: it comes from log content.
+  - *Invariant errors.* `KvStateMachine.InvariantError = error{KvInvariant}` and
+    `check_invariants(kv: *const KvStateMachine) InvariantError!void` (no table, `len` past the
+    buffer, a zero index, a corrupt record, a command key past the table);
+    `Workload.InvariantError = error{WorkloadInvariant}` and `check_invariants(workload: *const
+    Workload) InvariantError!void` (`len` past `history_ops_max`, a key past `keys_count`, a
+    completion not after its invoke, a `completed` count that disagrees with the records, a busy
+    slot whose operation is complete, missing or another client's).
+    `Workload.applied(...) InvariantError!void` returns `WorkloadInvariant` for a corrupt
+    record, for the operation's own entry naming another client, and for an apply at or before
+    the invoke event. `Simulation` runs `kv.check_invariants` on every drain and
+    `workload.check_invariants` before `check(.linearizability)`; `NodeError` includes both
+    errors, and the `Report` carries the seed.
+  - *No KV snapshot stream.* The `"SKV1"` snapshot stream above is not implemented: Phase 3 takes
+    no snapshots, so `KvStateMachine.snapshot` and `restore` return `StateMachineFailed` (a call
+    is a harness fault) until Phase 4 needs them.
