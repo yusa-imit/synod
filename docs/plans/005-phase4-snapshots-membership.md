@@ -20,7 +20,7 @@ Every code item is one PR with a failing test first; `zig build test`, `zig fmt 
 `zig build tidy`, `zig build sim -Dseeds=1000` and all CI jobs green before merge. Every item is
 `blocked_by: none`: synod depends on nothing.
 
-- [ ] 1. **ADR-009 — Phase 4 node contract.** `architect` (opus), docs, no test. Settles what
+- [x] 1. **ADR-009 — Phase 4 node contract.** `architect` (opus), docs, no test. Settles what
       ADR-007/008 deferred: `log.Log` base `(index, term)`; who snapshots (node emits a due
       effect, driver runs `StateMachine.snapshot` → `save_snapshot` → `sync`, node compacts on
       confirmation); knobs `snapshot_entries_min`, `trailing`; `Restore.snapshot`; `Input`/
