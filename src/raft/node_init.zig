@@ -218,7 +218,7 @@ pub fn check_invariants_indices(node: *const Node) InvariantError!void {
     if (node.applied_index.order(node.commit_index) == .gt) {
         return error.InvariantAppliedBeyondCommit;
     }
-    if (node.term.order(node.log.term_at(last_index)) == .lt) {
+    if (node.term.order(node.log.last_term()) == .lt) {
         return error.InvariantTermBehindLog;
     }
     assert(node.commit_index.order(last_index) != .gt);

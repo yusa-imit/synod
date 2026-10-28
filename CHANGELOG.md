@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- `log.Log` base index (plan 005 item 2): `Base`, `reset`, `compact`, `last_term`, `entry_at`,
+  `range`; `term_at` returns `error.LogCompacted` below the base; `validate` checks the first
+  entry sits at `base + 1` (new `InvariantBaseMalformed`). The node still runs with a zero base.
+
 ## [0.5.0] - 2026-10-27
 
 ### Changed
