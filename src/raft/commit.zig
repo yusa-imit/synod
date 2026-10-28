@@ -49,7 +49,14 @@ pub fn advance_leader(node: *Node) void {
     }
     assert(quorum <= node.log.count); // No peer matches beyond the leader's log.
     if (quorum <= commit_before) return;
-    if (node.log.term_at(@enumFromInt(quorum)) != node.term) return; // Figure 8.
+    assert(node.log.base.index == .zero); // Items 3-5 convert this site to the base.
+    const quorum_term = node.log.term_at(@enumFromInt(quorum)) catch |err| switch (err) {
+        // `quorum > commit_before >= 0 == log.base.index`: the base stays zero until compaction
+        // lands (plan 005 items 3-5; nothing calls `compact`/`reset` with a nonzero base yet),
+        // and later the base never passes the commit index, so `quorum` is above the base.
+        error.LogCompacted => unreachable,
+    };
+    if (quorum_term != node.term) return; // Figure 8.
 
     node.commit_index = @enumFromInt(quorum);
     node.emit_hard_state();

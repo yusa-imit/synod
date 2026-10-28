@@ -403,7 +403,7 @@ pub const Node = struct {
         const free = node.vote == .none or node.vote == head.from;
         const grant = free and election.log_up_to_date(
             last,
-            node.log.term_at(last),
+            node.log.last_term(),
             request.last_log_index,
             request.last_log_term,
         );
@@ -447,7 +447,7 @@ pub const Node = struct {
             (node.leader != .none and node.election_elapsed < node.config.election_ticks);
         const log_ok = election.log_up_to_date(
             last,
-            node.log.term_at(last),
+            node.log.last_term(),
             request.last_log_index,
             request.last_log_term,
         );
@@ -606,7 +606,7 @@ pub const Node = struct {
             else
                 node.term),
             .last_log_index = last,
-            .last_log_term = node.log.term_at(last),
+            .last_log_term = node.log.last_term(),
         };
         switch (node.role) {
             .candidate => node.emit(.{ .send = .{ .request_vote = request } }),

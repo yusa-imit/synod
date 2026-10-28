@@ -295,6 +295,13 @@ fn send_slot(node: *Node, slot: u32, peer: NodeId) void {
     const first: u32 = @intCast(prev);
     const batch_count = @min(node.log.count - first, node.config.message_limits.entries_max);
     const stop = first + batch_count;
+    assert(node.log.base.index == .zero); // Item 5 converts this site to a snapshot send.
+    const prev_term = node.log.term_at(@enumFromInt(first)) catch |err| switch (err) {
+        // `first` is the peer's `next - 1 >= 0 == log.base.index`: the base stays zero until
+        // compaction lands (plan 005 items 3-5; nothing calls `compact`/`reset` with a
+        // nonzero base yet), so no index is below it.
+        error.LogCompacted => unreachable,
+    };
     const round = node.rounds.id_next;
     assert(round < std.math.maxInt(u64));
 
@@ -308,7 +315,7 @@ fn send_slot(node: *Node, slot: u32, peer: NodeId) void {
     node.emit(.{ .send = .{ .append_entries = .{
         .header = node.header_to(peer),
         .prev_log_index = @enumFromInt(first),
-        .prev_log_term = node.log.term_at(@enumFromInt(first)),
+        .prev_log_term = prev_term,
         .leader_commit = node.commit_index,
         .round = round,
         .entries = node.log.entries[first..stop],

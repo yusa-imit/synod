@@ -133,6 +133,7 @@ fn describe_invariant(err: node_module.InvariantError) u8 {
         error.InvariantIndexNotContiguous,
         error.InvariantTermRegressed,
         error.InvariantSnapshotGap,
+        error.InvariantBaseMalformed,
         => 0,
         error.InvariantCommitBeyondLog,
         error.InvariantAppliedBeyondCommit,

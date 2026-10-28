@@ -33,7 +33,8 @@ pub const Log = struct { entries: []Entry, count: u32, base: Base, // [i].index 
 `compact` sets `base = (through, term_at(through))`, moving the kept slots to the front once.
 `term_at(base.index)` is `base.term`; below it is `LogCompacted` (a peer may ask). `conflict_at`
 requires `prev_log_index >= base.index` (callers trim, below). `validate`: first entry at
-`base.index + 1` (`InvariantSnapshotGap`), term `>= base.term` (`InvariantTermRegressed`).
+`base.index + 1` (`InvariantSnapshotGap`), term `>= base.term` (`InvariantTermRegressed`), and
+`base.index`/`base.term` are both zero or both nonzero (`InvariantBaseMalformed`).
 `Log` owns no bytes: `snapshot.compact` re-packs the node arena once per compaction (one
 `copyForwards`, each `data` re-pointed), never grows it.
 

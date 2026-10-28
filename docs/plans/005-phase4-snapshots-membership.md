@@ -27,7 +27,7 @@ Every code item is one PR with a failing test first; `zig build test`, `zig fmt 
       `Effect` variants for conf change, ReadIndex, install (persist), restore (apply); the
       effect slot count; `ConfChange` codec (magic, version, crc32); sim snapshot sizing.
       *Verify:* `docs/adr/0009-*.md` merged, naming every `pub` symbol of items 2–10.
-- [ ] 2. **4D-i `log.Log` base index.** `compact(through)` keeps the dropped prefix's
+- [x] 2. **4D-i `log.Log` base index.** `compact(through)` keeps the dropped prefix's
       `(index, term)` as base; `term_at(base)` answers, below it is a typed `LogCompacted` (a
       peer may ask legitimately); `validate` requires the first entry at `base + 1`. Node-owned
       bytes are re-packed once per compaction, never grown. *Failing test first:* 200 appends
