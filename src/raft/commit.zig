@@ -41,19 +41,19 @@ pub fn advance_leader(node: *Node) void {
     assert(node.progress_len <= node.progress.len);
     const sets = &node.configuration;
     const commit_before = @intFromEnum(node.commit_index);
-    assert(commit_before <= node.log.count);
+    const last = @intFromEnum(node.log.last_index());
+    assert(commit_before <= last);
 
     var quorum = quorum_index(node, sets.voters);
     if (sets.voters_outgoing.len > 0) {
         quorum = @min(quorum, quorum_index(node, sets.voters_outgoing));
     }
-    assert(quorum <= node.log.count); // No peer matches beyond the leader's log.
+    assert(quorum <= last); // No peer matches beyond the leader's log.
     if (quorum <= commit_before) return;
-    assert(node.log.base.index == .zero); // Items 3-5 convert this site to the base.
+    assert(node.log.base.index.order(node.commit_index) != .gt); // Base <= snapshot <= applied.
     const quorum_term = node.log.term_at(@enumFromInt(quorum)) catch |err| switch (err) {
-        // `quorum > commit_before >= 0 == log.base.index`: the base stays zero until compaction
-        // lands (plan 005 items 3-5; nothing calls `compact`/`reset` with a nonzero base yet),
-        // and later the base never passes the commit index, so `quorum` is above the base.
+        // `quorum > commit_before >= log.base.index`: the base never passes the applied index,
+        // which never passes the commit index, so `quorum` is above the base.
         error.LogCompacted => unreachable,
     };
     if (quorum_term != node.term) return; // Figure 8.
@@ -61,7 +61,7 @@ pub fn advance_leader(node: *Node) void {
     node.commit_index = @enumFromInt(quorum);
     node.emit_hard_state();
     assert(@intFromEnum(node.commit_index) > commit_before);
-    assert(@intFromEnum(node.commit_index) <= node.log.count);
+    assert(@intFromEnum(node.commit_index) <= last);
 }
 
 /// The follower's commit rule after an accepted append: `last_new` is `prev_log_index +
@@ -69,9 +69,10 @@ pub fn advance_leader(node: *Node) void {
 /// the node follows and `last_new` is inside the log. `leader_commit` is peer data: any value.
 pub fn advance_follower(node: *Node, leader_commit: Index, last_new: u64) void {
     assert(node.role == .follower);
-    assert(last_new <= node.log.count);
+    const last = @intFromEnum(node.log.last_index());
+    assert(last_new <= last);
     const commit_before = @intFromEnum(node.commit_index);
-    assert(commit_before <= node.log.count);
+    assert(commit_before <= last);
 
     const target = @min(@intFromEnum(leader_commit), last_new);
     if (target <= commit_before) return;
@@ -79,7 +80,7 @@ pub fn advance_follower(node: *Node, leader_commit: Index, last_new: u64) void {
     node.commit_index = @enumFromInt(target);
     node.emit_hard_state();
     assert(@intFromEnum(node.commit_index) > commit_before);
-    assert(@intFromEnum(node.commit_index) <= node.log.count);
+    assert(@intFromEnum(node.commit_index) <= last);
 }
 
 /// Emits one `apply` for `(applied_index, commit_index]` and marks it applied; emits nothing
@@ -90,7 +91,7 @@ pub fn apply_ready(node: *Node) void {
     const applied = @intFromEnum(node.applied_index);
     const commit = @intFromEnum(node.commit_index);
     assert(applied <= commit);
-    assert(commit <= node.log.count);
+    assert(commit <= @intFromEnum(node.log.last_index()));
     if (applied == commit) return;
 
     assert(node.effects_len < node.effects.len);
@@ -104,7 +105,7 @@ pub fn apply_ready(node: *Node) void {
 
     const last = node.effects_len;
     @memmove(node.effects[at + 1 .. last + 1], node.effects[at..last]);
-    node.effects[at] = .{ .apply = node.log.entries[@intCast(applied)..@intCast(commit)] };
+    node.effects[at] = .{ .apply = node.log.range(node.applied_index, node.commit_index) };
     node.effects_len = last + 1;
     node.applied_index = node.commit_index;
     assert(node.effects[at].phase() == .apply);
@@ -132,7 +133,7 @@ fn quorum_index(node: *const Node, set: []const NodeId) u64 {
 fn match_of(node: *const Node, voter: NodeId) u64 {
     assert(voter != .none);
     assert(node.role == .leader);
-    if (voter == node.config.id) return node.log.count;
+    if (voter == node.config.id) return @intFromEnum(node.log.last_index());
     // Every voter of either set other than self got a `Progress` in `leader.start`, and
     // `slot_of` searches that same set, so a miss is a broken invariant, not an input.
     const slot = leader_module.slot_of(node, voter) orelse unreachable;

@@ -111,7 +111,7 @@ fn notify_leader(node: *Node, leader_before: NodeId, bumped: bool) void {
 }
 
 /// Where the batch lands: entries from `first` on are appended after the log is cut to `keep`
-/// entries (`keep == log.count` means no cut).
+/// live entries (`keep == log.count` means no cut), i.e. at index `log.base.index + keep + 1`.
 const Plan = struct {
     first: usize,
     keep: u32,
@@ -120,6 +120,42 @@ const Plan = struct {
 /// The consistency check, the walk and the reply for the leader of our term.
 fn replicate(node: *Node, request: *const AppendRequest) void {
     assert(node.role == .follower);
+    assert(node.leader == request.header.from);
+    if (request.prev_log_index.order(node.log.base.index) == .lt) {
+        return replicate_below_base(node, request);
+    }
+    replicate_from(node, request);
+}
+
+/// A request whose `prev_log_index` is below our base: the entries up to the base are committed
+/// here and so, by log matching, equal the leader's; they are skipped. If none remain the
+/// request is accepted at its last index and nothing changes; else the rest is handled as if
+/// `prev` were the base, unless the leader's entry at the base carries another term (a faulty
+/// peer): then the request is dropped whole, like a conflict below `commit_index`.
+fn replicate_below_base(node: *Node, request: *const AppendRequest) void {
+    const base = node.log.base;
+    assert(request.prev_log_index.order(base.index) == .lt);
+    assert(base.index != .zero);
+    const skip = @intFromEnum(base.index) - @intFromEnum(request.prev_log_index);
+    const matched: Index = @enumFromInt(@intFromEnum(request.prev_log_index) +
+        request.entries.len);
+    if (skip >= request.entries.len) {
+        commit_module.advance_follower(node, request.leader_commit, @intFromEnum(matched));
+        return reply(node, request, .{ .accepted = matched });
+    }
+    if (request.entries[skip - 1].term != base.term) return;
+
+    var trimmed = request.*;
+    trimmed.prev_log_index = base.index;
+    trimmed.prev_log_term = base.term;
+    trimmed.entries = request.entries[skip..];
+    assert(trimmed.prev_log_index.order(request.prev_log_index) == .gt);
+    replicate_from(node, &trimmed);
+}
+
+/// The check, walk and reply for a request with `prev_log_index >= log.base.index`.
+fn replicate_from(node: *Node, request: *const AppendRequest) void {
+    assert(request.prev_log_index.order(node.log.base.index) != .lt);
     assert(node.leader == request.header.from);
     if (node.log.conflict_at(request.prev_log_index, request.prev_log_term)) |conflict| {
         return reply(node, request, .{ .rejected = conflict });
@@ -138,24 +174,26 @@ fn replicate(node: *Node, request: *const AppendRequest) void {
 /// Precondition: `prev_log_index <= last_index` and the term there matched.
 fn plan_walk(node: *const Node, request: *const AppendRequest) ?Plan {
     const prev: u64 = @intFromEnum(request.prev_log_index);
+    const base: u64 = @intFromEnum(node.log.base.index);
     const count: u32 = node.log.count;
-    assert(prev <= count);
+    assert(prev <= base + count);
+    assert(prev >= base);
 
     var plan: Plan = .{ .first = request.entries.len, .keep = count };
     for (request.entries, 0..) |item, i| {
         const index = prev + 1 + i;
         assert(@intFromEnum(item.index) == index); // `Message.validate` checked contiguity.
-        if (index > count) {
+        if (index > base + count) {
             plan = .{ .first = i, .keep = count };
             break;
         }
-        if (node.log.entries[@intCast(index - 1)].term == item.term) continue;
+        if (node.log.entry_at(item.index).term == item.term) continue;
         if (index <= @intFromEnum(node.commit_index)) return null;
-        plan = .{ .first = i, .keep = @intCast(index - 1) };
+        plan = .{ .first = i, .keep = @intCast(index - base - 1) };
         break;
     }
     assert(plan.first <= request.entries.len);
-    assert(plan.keep >= @intFromEnum(node.commit_index));
+    assert(base + plan.keep >= @intFromEnum(node.commit_index));
     if (!fits(node, plan, request.entries)) return null;
     return plan;
 }
@@ -185,13 +223,15 @@ fn bytes_of(entries: []const Entry) u64 {
 /// Precondition: `keep < log.count`.
 fn cut_log(node: *Node, keep: u32) void {
     assert(keep < node.log.count);
-    assert(keep >= @intFromEnum(node.commit_index));
+    const base: u64 = @intFromEnum(node.log.base.index);
+    assert(base + keep >= @intFromEnum(node.commit_index));
     const freed = bytes_of(node.log.entries[keep..node.log.count]);
-    const from: Index = @enumFromInt(@as(u64, keep) + 1);
+    const from: Index = @enumFromInt(base + keep + 1);
     node.log.truncate(from);
     node.bytes_used -= @intCast(freed);
     node.emit(.{ .truncate = from });
     assert(node.log.count == keep);
+    assert(node.log.last_index().order(from) == .lt);
     assert(node.bytes_used <= node.bytes.len);
 }
 

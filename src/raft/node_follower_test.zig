@@ -609,6 +609,8 @@ test "follower: a conflict just above commit_index truncates, a fully matching o
 const cfg_entries4: Config = blk: {
     var c = cfg;
     c.log_entries_max = 4;
+    c.snapshot_entries_min = 3; // Below the log size (plan 005 item 3).
+    c.snapshot_trailing = 1;
     break :blk c;
 };
 
@@ -894,10 +896,13 @@ test "follower: for every commit_index a conflict at or below it is dropped, abo
 }
 
 test "follower: the worst step fills every effect slot, with the commit saved after the append" {
-    // One voter per set: `peers_max = 1`, the smallest effect array (`peers_max + 7` = 8 slots).
+    // One voter per set: `peers_max = 1`, the smallest effect array (`peers_max + 9` = 10 slots,
+    // one of them for the `read_failed` of plan 005 item 9, so this step uses 9).
     var tight = cfg;
     tight.voters_max = 1;
     tight.learners_max = 0;
+    tight.snapshot_entries_min = 2; // The two applied entries make a snapshot due.
+    tight.snapshot_trailing = 1;
     const incoming = [_]types.NodeId{node_id(2)};
     const outgoing = [_]types.NodeId{node_id(3)};
     var buffer: [2]Entry = undefined;
@@ -917,7 +922,7 @@ test "follower: the worst step fills every effect slot, with the commit saved af
     var message = append_msg(3, 2, 1, 1, 2, &fresh_tail);
     message.append_entries.leader_commit = idx(2);
     const effects = try recv(&rig, message);
-    try testing.expectEqual(@as(usize, fixtures.effects_capacity(tight)), effects.items.len);
+    try testing.expectEqual(@as(usize, fixtures.effects_capacity(tight) - 1), effects.items.len);
     try testing.expectEqual(fixtures.hard_state_of(2, 0, 0), effects.items[0].save_hard_state);
     try testing.expectEqual(idx(2), effects.items[1].truncate);
     try fixtures.expect_entries_equal(&fresh_tail, effects.items[2].append);
@@ -926,6 +931,7 @@ test "follower: the worst step fills every effect slot, with the commit saved af
     try fixtures.expect_entries_equal(&.{ start[0], fresh_tail[0] }, effects.items[5].apply);
     try testing.expectEqual(types.NodeId.none, effects.items[6].leader_changed);
     try testing.expectEqual(node_id(3), effects.items[7].leader_changed);
+    try testing.expectEqual(idx(2), effects.items[8].snapshot_due.snapshot.index);
 }
 
 fn expect_accepted_from(effects: Effects, to: u64, round: u64, at_term: u64, matched: u64) !void {

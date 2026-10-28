@@ -44,4 +44,6 @@ test {
     _ = @import("raft/node_follower_test.zig");
     // Commit advancement and apply (2B-iii) likewise.
     _ = @import("raft/node_commit_test.zig");
+    // The compaction policy (plan 005 item 3) likewise.
+    _ = @import("raft/node_snapshot_test.zig");
 }

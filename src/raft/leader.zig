@@ -102,15 +102,15 @@ pub const Storage = struct {
 /// first `append_entries` to each. Preconditions: the node just became leader and has no
 /// progress; the effects so far are at most `save_hard_state` (a lone voter) and the empty
 /// entry's `append`.
-pub fn start(node: *Node, last_before: u32) void {
+pub fn start(node: *Node, last_before: Index) void {
     assert(node.role == .leader);
     assert(node.progress_len == 0);
     assert(node.effects_len <= 2);
-    assert(last_before <= node.log.count);
+    assert(last_before.order(node.log.last_index()) != .gt);
 
     const peers = peers_count(node);
     assert(peers <= node.progress.len);
-    const fresh = Progress.init(@enumFromInt(last_before), node.config.inflight_max);
+    const fresh = Progress.init(last_before, node.config.inflight_max);
     @memset(node.progress[0..peers], fresh);
     node.progress_len = peers;
     node.rounds.ticks = 0;
@@ -172,7 +172,7 @@ pub fn step_response(node: *Node, reply: *const AppendResponse) void {
             remove_record(node, slot, at);
             // A new match may complete a quorum: persist the commit before the next send.
             if (p.on_accepted(matched)) commit_module.advance_leader(node);
-            if (@intFromEnum(p.next) <= node.log.count) send_slot(node, slot, peer);
+            if (p.next.order(node.log.last_index()) != .gt) send_slot(node, slot, peer);
         },
         .rejected => |conflict| if (p.on_rejected(conflict, round.prev)) {
             send_slot(node, slot, peer); // The window is gone, so every record is dead.
@@ -277,7 +277,9 @@ fn check_invariants_rounds(node: *const Node, slot: u32) InvariantError!void {
         if (@intFromEnum(round.prev) > @intFromEnum(round.last_sent)) {
             return error.InvariantProgressOrder;
         }
-        if (@intFromEnum(round.last_sent) > node.log.count) return error.InvariantProgressOrder;
+        if (round.last_sent.order(node.log.last_index()) == .gt) {
+            return error.InvariantProgressOrder;
+        }
     }
 }
 
@@ -289,17 +291,15 @@ fn send_slot(node: *Node, slot: u32, peer: NodeId) void {
     const p = &node.progress[slot];
     if (!p.can_send()) return;
 
-    assert(@intFromEnum(node.log.last_index()) == node.log.count); // No compaction offset yet.
-    const prev = @intFromEnum(p.next) - 1; // `next >= 1` is a `Progress` invariant.
-    assert(prev <= node.log.count); // The leader's log is the longest a peer can match.
-    const first: u32 = @intCast(prev);
-    const batch_count = @min(node.log.count - first, node.config.message_limits.entries_max);
-    const stop = first + batch_count;
-    assert(node.log.base.index == .zero); // Item 5 converts this site to a snapshot send.
+    const last = @intFromEnum(node.log.last_index());
+    const first = @intFromEnum(p.next) - 1; // `next >= 1` is a `Progress` invariant.
+    assert(first <= last); // The leader's log is the longest a peer can match.
+    // A peer behind the compacted prefix needs an InstallSnapshot (plan 005 item 5): until that
+    // lands it gets nothing, and the log keeps `snapshot_trailing` entries for slight lag.
+    if (first < @intFromEnum(node.log.base.index)) return;
+    const stop = @min(last, first + node.config.message_limits.entries_max);
     const prev_term = node.log.term_at(@enumFromInt(first)) catch |err| switch (err) {
-        // `first` is the peer's `next - 1 >= 0 == log.base.index`: the base stays zero until
-        // compaction lands (plan 005 items 3-5; nothing calls `compact`/`reset` with a
-        // nonzero base yet), so no index is below it.
+        // `first >= log.base.index` was just checked.
         error.LogCompacted => unreachable,
     };
     const round = node.rounds.id_next;
@@ -318,7 +318,7 @@ fn send_slot(node: *Node, slot: u32, peer: NodeId) void {
         .prev_log_term = prev_term,
         .leader_commit = node.commit_index,
         .round = round,
-        .entries = node.log.entries[first..stop],
+        .entries = node.log.range(@enumFromInt(first), @enumFromInt(stop)),
     } } });
     p.on_send(@enumFromInt(stop));
 }
