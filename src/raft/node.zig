@@ -223,7 +223,13 @@ pub const Node = struct {
             .message => |message| try node.step_message(message),
             .tick => node.step_tick(),
             .propose => |data| try node.step_propose(data),
-            .snapshot_saved => |index| try snapshot_module.saved(node, index),
+            .snapshot_saved => |index| {
+                try snapshot_module.saved(node, index);
+                // ADR-009: the driver asserts a save's Effects empty. A due owed now (applied
+                // moved past the saved index) is emitted by the next step instead.
+                assert(node.effects_len == 0);
+                return .{ .items = node.effects[0..0] };
+            },
         }
         commit_module.apply_ready(node); // After every send, before any `leader_changed`.
         snapshot_module.emit_due(node); // Last: the snapshot phase follows notify.
