@@ -37,10 +37,10 @@
 //! replacement that is then stored only in part. Dropping whole keeps the write atomic and lets
 //! the leader's round timeout pace the retry. ADR-007 is amended to match.
 //!
-//! Invariants: after any call the log is contiguous from index 1, entry bytes are packed in
+//! Invariants: after any call the log is contiguous from `base + 1`, entry bytes are packed in
 //! index order (`bytes_used` is exact), `commit_index` never decreased and is within the log, and
 //! `leader_changed` is the last effect. Allocation: none; the effect array has room for the
-//! eight effects of the worst case (hard state, truncate, append, hard state, reply, `apply`,
+//! nine effects of the worst case (hard state, truncate, append, hard state, reply, `apply`,
 //! `leader_changed(none)`, `leader_changed(id)`).
 //! Cost sketch: O(batch) to compare terms, O(batch + cut suffix) bytes counted for the capacity
 //! check, one `memcpy` per appended entry; `conflict_at` scans at most one term run backwards.
@@ -136,14 +136,18 @@ fn replicate_below_base(node: *Node, request: *const AppendRequest) void {
     const base = node.log.base;
     assert(request.prev_log_index.order(base.index) == .lt);
     assert(base.index != .zero);
-    const skip = @intFromEnum(base.index) - @intFromEnum(request.prev_log_index);
+    const skip_raw = @intFromEnum(base.index) - @intFromEnum(request.prev_log_index);
+    assert(skip_raw >= 1);
     const matched: Index = @enumFromInt(@intFromEnum(request.prev_log_index) +
         request.entries.len);
-    if (skip >= request.entries.len) {
-        commit_module.advance_follower(node, request.leader_commit, @intFromEnum(matched));
-        return reply(node, request, .{ .accepted = matched });
-    }
-    if (request.entries[skip - 1].term != base.term) return;
+    // The batch ends below the base: committed here, so equal to the leader's. Nothing to check
+    // or store, and `matched <= base <= commit` leaves the commit index where it is.
+    if (skip_raw > request.entries.len) return reply(node, request, .{ .accepted = matched });
+
+    const skip: usize = @intCast(skip_raw);
+    assert(skip <= request.entries.len);
+    if (request.entries[skip - 1].term != base.term) return; // The entry at the base disagrees.
+    if (skip == request.entries.len) return reply(node, request, .{ .accepted = matched });
 
     var trimmed = request.*;
     trimmed.prev_log_index = base.index;
