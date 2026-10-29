@@ -32,7 +32,7 @@ Every code item is one PR with a failing test first; `zig build test`, `zig fmt 
       peer may ask legitimately); `validate` requires the first entry at `base + 1`. Node-owned
       bytes are re-packed once per compaction, never grown. *Failing test first:* 200 appends
       through a 64-slot log compacted every 32; seeded model of `term_at`/`append`/`truncate`.
-- [ ] 3. **4D-ii Compaction policy in the node.** Emit the due effect when
+- [x] 3. **4D-ii Compaction policy in the node.** Emit the due effect when
       `applied - base >= snapshot_entries_min`, compact on confirmation keeping `trailing`
       entries; `check_invariants` adds `base <= applied`. In `src/raft/snapshot.zig`: `node.zig`
       is at its 800-line cap. *Failing test first:* a `log_entries_max = 64` node commits and
