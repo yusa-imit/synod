@@ -16,7 +16,9 @@ All notable changes to this project are documented in this file. Format follows
   `InvariantError.InvariantBaseBeyondApplied`; the node emits a due and compacts the log and
   entry-byte arena on confirmation. The declarations moved to `raft/contract.zig` (re-exported
   unchanged); commit, follower and leader paths use the log base. The driver ignores
-  `snapshot_due` until plan 005 item 4.
+  `snapshot_due` until plan 005 item 4. A save step now emits nothing (ADR-009); a due owed
+  then is emitted by the next step. A follower request ending at a compacted base is checked
+  against the base term.
 
 ## [0.5.0] - 2026-10-27
 

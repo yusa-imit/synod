@@ -10,11 +10,6 @@
 //! snapshot index the contract implies, and after every step checks the ADR-007 phase order,
 //! `check_invariants()`, that a due appears exactly when the model says one is owed (and is the
 //! only one, and last), and that a save leaves the log where the model puts it.
-//!
-//! Assumed new names: `Config.{snapshot_entries_min, snapshot_trailing}`, `Input.snapshot_saved:
-//! Index`, `Effect.snapshot_due` (payload `.snapshot: log.Base`, `.configuration`),
-//! `Effect.Phase.snapshot = 5`, `Status.snapshot_index`, `Node.snapshot_index` (the field a test
-//! corrupts), `StepError.SnapshotUnexpected`, `InvariantError.InvariantBaseBeyondApplied`.
 
 const std = @import("std");
 const testing = std.testing;

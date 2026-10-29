@@ -46,4 +46,6 @@ test {
     _ = @import("raft/node_commit_test.zig");
     // The compaction policy (plan 005 item 3) likewise.
     _ = @import("raft/node_snapshot_test.zig");
+    // Peer-reachable paths over a compacted log (review of plan 005 item 3) likewise.
+    _ = @import("raft/node_base_test.zig");
 }

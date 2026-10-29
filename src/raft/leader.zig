@@ -168,7 +168,7 @@ pub fn step_response(node: *Node, reply: *const AppendResponse) void {
             const m = @intFromEnum(matched);
             if (m < @intFromEnum(round.prev)) return;
             if (m > @intFromEnum(round.last_sent)) return;
-            assert(m < std.math.maxInt(u64)); // `last_sent` came from a `u32` log count.
+            assert(m < std.math.maxInt(u64)); // `last_sent` is a log index, far below the limit.
             remove_record(node, slot, at);
             // A new match may complete a quorum: persist the commit before the next send.
             if (p.on_accepted(matched)) commit_module.advance_leader(node);
