@@ -230,4 +230,5 @@ test "driver: module compiles" {
 test {
     _ = @import("driver_test.zig");
     _ = @import("driver_init_bytes_test.zig");
+    _ = @import("driver_snapshot_test.zig");
 }
