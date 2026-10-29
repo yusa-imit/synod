@@ -133,6 +133,7 @@ const Model = struct {
                 .commit_index = fx.idx(model.node_commit[i]),
                 .applied_index = fx.idx(model.node_applied[i]),
                 .last_index = fx.idx(log.len),
+                .snapshot_index = .zero,
             }, .log = log };
             model.reported_max = @max(model.reported_max, model.node_commit[i]);
         }

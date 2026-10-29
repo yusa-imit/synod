@@ -167,6 +167,9 @@ pub const Options = struct {
                 .inflight_max = 4,
                 .log_entries_max = 64,
                 .log_bytes_max = 64 * workload_module.command_bytes,
+                // The driver does not save snapshots yet (plan 005 item 4), so a due is ignored.
+                .snapshot_entries_min = 3,
+                .snapshot_trailing = 1,
                 .message_limits = .{
                     .entries_max = 4,
                     .entry_bytes_max = workload_module.command_bytes,

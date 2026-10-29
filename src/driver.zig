@@ -209,6 +209,9 @@ pub const Driver = struct {
                     for (entries) |*entry| try driver.deps.state_machine.apply(entry);
                 },
                 .leader_changed => {},
+                // Item 4 (plan 005) implements the save path; until then the due stays pending
+                // and `snapshot_saved` is never sent, so nothing compacts.
+                .snapshot_due => {},
             }
             if (phase == .persist) unsynced = true;
         }

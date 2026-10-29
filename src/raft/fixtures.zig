@@ -89,6 +89,7 @@ pub const configuration: Configuration = .{
 };
 
 /// Election timeout draws land in [10, 20); the log holds at most 8 entries and 64 bytes.
+/// A snapshot is due 7 applied entries past the base, keeping 3 (plan 005 item 3).
 pub const config: Config = .{
     .id = node_id(1),
     .protocol_version = types.protocol_version_current,
@@ -99,14 +100,16 @@ pub const config: Config = .{
     .inflight_max = 4,
     .log_entries_max = 8,
     .log_bytes_max = 64,
+    .snapshot_entries_min = 7,
+    .snapshot_trailing = 3,
     .message_limits = .{ .entries_max = 4, .entry_bytes_max = 32, .snapshot_bytes_max = 128 },
 };
 
-/// Slots an `Effects` view can hold: `peers_max + 7` with `peers_max = 2 * voters_max +
+/// Slots an `Effects` view can hold: `peers_max + 9` with `peers_max = 2 * voters_max +
 /// learners_max - 1` (ADR-007), derived here from `config`, never read from the node.
 pub fn effects_capacity(node_config: Config) u32 {
     const peers_max = 2 * node_config.voters_max + node_config.learners_max - 1;
-    return peers_max + 7;
+    return peers_max + 9;
 }
 
 pub fn restore_of(hard_state: HardState, entries: []const Entry) Restore {

@@ -13,10 +13,11 @@
 /// Effect slots beyond one per peer. The worst step is a follower that adopts a higher term and
 /// accepts a conflicting batch: `save_hard_state`, `truncate`, `append`, `save_hard_state`
 /// (commit), the reply `send`, `apply`, `leader_changed(none)`, `leader_changed(id)` = 8 with
-/// one send, so `peers_max + 7` (`peers_max >= 1`). The leader's worst steps are smaller: the
-/// win of a lone voter (`save`, `append`, `save`, `apply`, `leader_changed`) and a response
-/// (`save`, one send, `apply`).
-pub const effects_fixed_count: u32 = 7;
+/// one send, plus the one `snapshot_due` (ADR-009) = 9, so `peers_max + 9` for ADR-009's 10
+/// worst case (`peers_max >= 1`, `read_failed` joins later). The leader's worst steps are
+/// smaller: the win of a lone voter (`save`, `append`, `save`, `apply`, `leader_changed`,
+/// `snapshot_due`) and a response (`save`, one send, `apply`, `snapshot_due`).
+pub const effects_fixed_count: u32 = 9;
 
 /// Asserts the `Config` contract of ADR-007: a caller's bug, never a returned error.
 pub fn assert_config(config: *const Config) void {
@@ -30,6 +31,9 @@ pub fn assert_config(config: *const Config) void {
     assert(config.learners_max <= types.learners_max);
     assert(config.inflight_max > 0);
     assert(config.log_entries_max > 0);
+    assert(config.snapshot_entries_min >= 1);
+    assert(config.snapshot_entries_min < config.log_entries_max);
+    assert(config.snapshot_trailing < config.snapshot_entries_min);
 }
 
 /// `peers_max = 2 * voters_max + learners_max - 1`: joint-sized so Phase 4 changes no size.
@@ -38,7 +42,7 @@ pub fn effects_capacity(config: *const Config) u32 {
     assert(peers_max >= 1);
     const result = peers_max + effects_fixed_count;
     assert(result >= peers_max + 3); // The winning step: hard state, append, sends, leader_changed.
-    assert(result >= 8); // The follower's worst step, see `effects_fixed_count`.
+    assert(result >= 10); // The follower's worst step, see `effects_fixed_count`.
     return result;
 }
 
@@ -217,6 +221,12 @@ pub fn check_invariants_indices(node: *const Node) InvariantError!void {
     if (node.commit_index.order(last_index) == .gt) return error.InvariantCommitBeyondLog;
     if (node.applied_index.order(node.commit_index) == .gt) {
         return error.InvariantAppliedBeyondCommit;
+    }
+    if (node.snapshot_index.order(node.log.base.index) == .lt) {
+        return error.InvariantBaseBeyondApplied;
+    }
+    if (node.snapshot_index.order(node.applied_index) == .gt) {
+        return error.InvariantBaseBeyondApplied;
     }
     if (node.term.order(node.log.last_term()) == .lt) {
         return error.InvariantTermBehindLog;

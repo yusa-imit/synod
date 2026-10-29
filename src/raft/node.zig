@@ -20,7 +20,9 @@
 //! every voter set matches, a follower takes `min(leader_commit, last new entry)`, each advance is
 //! a `save_hard_state` ahead of the sends; `step` ends by emitting one `apply` for `(applied_index,
 //! commit_index]` before any `leader_changed`, so a restored node replays its committed prefix on
-//! its first step. The pure decisions live in `election.zig`.
+//! its first step. The pure decisions live in `election.zig`. After `apply_ready`, `step` ends
+//! with `snapshot.emit_due`; `Input.snapshot_saved` compacts the log (`snapshot.zig`, plan 005
+//! item 3). The declarations a driver sees live in `contract.zig` and are re-exported here.
 //!
 //! Invariants: `check_invariants` states them: commit within the log, applied within commit,
 //! the term at least the last entry's term, no vote in term zero, `role == .leader` exactly
@@ -30,7 +32,7 @@
 //!
 //! Allocation: `init` allocates everything the node will ever use from `gpa` (log slots, the
 //! `log_bytes_max` entry-byte arena, the member list, the `2 * voters_max` vote tally,
-//! `peers_max + 7` effect slots, and the leader's `2 * voters_max` `Progress` slots with
+//! `peers_max + 9` effect slots, and the leader's `2 * voters_max` `Progress` slots with
 //! `inflight_max` round records each). `step` and every other method take no allocator and never
 //! allocate (Tiger Style §1.9). `deinit` takes the same `gpa`; the node never stores it.
 //!
@@ -47,107 +49,19 @@
 //! `Progress` and one `Round` per peer (32 bytes each). Effects are written into one
 //! preallocated array, so the working set stays within a few cache lines.
 
-/// Node configuration. Spelled out at every call site; no defaults (ADR-007).
-pub const Config = struct {
-    /// This node. Never `.none`.
-    id: NodeId,
-    /// Sent in every `Header`; within `protocol_version_min..=protocol_version_current`.
-    protocol_version: u16,
-    /// `t`: the election timeout is drawn from `[t, 2t)` ticks. Greater than `heartbeat_ticks`.
-    election_ticks: u32,
-    /// A leader heartbeats every this many ticks; in `1..t-1`. A probing peer's round expires
-    /// after this many ticks, so a peer's round trip must stay below it to ever be matched.
-    heartbeat_ticks: u32,
-    /// Per voter set, within `1..=types.voters_max`.
-    voters_max: u32,
-    /// Within `0..=types.learners_max`.
-    learners_max: u32,
-    /// Unacknowledged `AppendRequest`s per peer; greater than zero.
-    inflight_max: u32,
-    /// Slots in the node's log; greater than zero.
-    log_entries_max: u32,
-    /// Bytes in the node-owned entry-byte arena.
-    log_bytes_max: u32,
-    /// Validates every received `Message` and bounds every batch.
-    message_limits: Message.Limits,
-};
-
-/// State recovered from the store, borrowed for the `init` call only; `init` copies all of it.
-pub const Restore = struct {
-    hard_state: HardState,
-    /// The whole log, contiguous from index 1.
-    entries: []const Entry,
-    configuration: Configuration,
-};
-
-pub const Input = union(enum) {
-    /// Borrowed until `step` returns.
-    message: *const Message,
-    /// One logical tick; carries no time value.
-    tick,
-    /// Command bytes, borrowed until `step` returns. Leader only.
-    propose: []const u8,
-};
-
-pub const Effect = union(enum) {
-    truncate: Index,
-    /// Non-empty and contiguous.
-    append: []const Entry,
-    save_hard_state: HardState,
-    /// The destination is `header().to` (ADR-006).
-    send: Message,
-    /// In index order, each exactly once.
-    apply: []const Entry,
-    /// `.none` means unknown. Informational.
-    leader_changed: NodeId,
-
-    /// Execution phases: the persist phase, then send, then apply, then notify.
-    pub const Phase = enum(u8) { persist = 1, send = 2, apply = 3, notify = 4 };
-
-    /// The phase in which a driver executes `effect`. Emission order is non-decreasing in it.
-    pub fn phase(effect: *const Effect) Phase {
-        const result: Phase = switch (effect.*) {
-            .truncate, .append, .save_hard_state => .persist,
-            .send => .send,
-            .apply => .apply,
-            .leader_changed => .notify,
-        };
-        assert(@intFromEnum(result) >= @intFromEnum(Phase.persist));
-        assert(@intFromEnum(result) <= @intFromEnum(Phase.notify));
-        return result;
-    }
-};
-
-/// Borrowed view of the effects of one `step`, valid until the next `step()`/`deinit()`.
-pub const Effects = struct { items: []const Effect };
-
-pub const Role = enum { follower, pre_candidate, candidate, leader };
-
-pub const Status = struct {
-    role: Role,
-    term: Term,
-    vote: NodeId,
-    leader: NodeId,
-    commit_index: Index,
-    applied_index: Index,
-    last_index: Index,
-};
-
-pub const InitError = Allocator.Error || ConfError || error{ RestoreLogFull, RestoreInconsistent };
-pub const ReceiveError = MessageError || error{StepMisrouted};
-pub const ProposeError = error{ ProposeNotLeader, ProposeTooLarge, ProposeLogFull };
-pub const StepError = ReceiveError || ProposeError;
-pub const InvariantError = log_module.Log.InvariantError || error{
-    InvariantCommitBeyondLog,
-    InvariantAppliedBeyondCommit,
-    InvariantTermBehindLog,
-    InvariantVoteWithoutTerm,
-    InvariantLeaderRole,
-    InvariantEntryDataMisplaced,
-    InvariantElectionTimeout,
-    InvariantProgressOrder,
-    InvariantInflightOverflow,
-};
+pub const Config = contract.Config;
+pub const Restore = contract.Restore;
+pub const Input = contract.Input;
+pub const SnapshotDue = contract.SnapshotDue;
+pub const Effect = contract.Effect;
+pub const Effects = contract.Effects;
+pub const Role = contract.Role;
+pub const Status = contract.Status;
+pub const InitError = contract.InitError;
+pub const ReceiveError = contract.ReceiveError;
+pub const ProposeError = contract.ProposeError;
+pub const StepError = contract.StepError;
+pub const InvariantError = contract.InvariantError;
 
 pub const Node = struct {
     config: Config,
@@ -157,6 +71,11 @@ pub const Node = struct {
     leader: NodeId,
     commit_index: Index,
     applied_index: Index,
+    /// The last snapshot the driver confirmed (`Input.snapshot_saved`); zero when none.
+    /// `log.base.index <= snapshot_index <= applied_index`.
+    snapshot_index: Index,
+    /// The index of the `snapshot_due` emitted and not yet confirmed; zero when none pending.
+    snapshot_pending: Index,
     log: log_module.Log,
     /// Ticks without hearing from a leader before an election; drawn from `[t, 2t)`.
     election_timeout: u32,
@@ -177,7 +96,7 @@ pub const Node = struct {
     /// `votes[0..votes_len]` is live and it holds no duplicate. `2 * voters_max` long.
     votes: []NodeId,
     votes_len: u32,
-    /// Effect slots, `peers_max + 7` long; `effects[0..effects_len]` is the last step's output.
+    /// Effect slots, `peers_max + 9` long; `effects[0..effects_len]` is the last step's output.
     effects: []Effect,
     effects_len: u32,
     /// Leader only: one `Progress` per other voter in `progress[0..progress_len]` (`leader.zig`).
@@ -234,6 +153,8 @@ pub const Node = struct {
             .leader = .none,
             .commit_index = restore.hard_state.commit_index,
             .applied_index = .zero,
+            .snapshot_index = .zero,
+            .snapshot_pending = .zero,
             .log = log,
             .election_timeout = node_init.election_timeout_draw(rng, config.election_ticks),
             .election_elapsed = 0,
@@ -302,8 +223,10 @@ pub const Node = struct {
             .message => |message| try node.step_message(message),
             .tick => node.step_tick(),
             .propose => |data| try node.step_propose(data),
+            .snapshot_saved => |index| try snapshot_module.saved(node, index),
         }
         commit_module.apply_ready(node); // After every send, before any `leader_changed`.
+        snapshot_module.emit_due(node); // Last: the snapshot phase follows notify.
 
         assert(node.effects_len <= node.effects.len);
         return .{ .items = node.effects[0..node.effects_len] };
@@ -320,6 +243,7 @@ pub const Node = struct {
             .commit_index = node.commit_index,
             .applied_index = node.applied_index,
             .last_index = node.log.last_index(),
+            .snapshot_index = node.snapshot_index,
         };
     }
 
@@ -651,6 +575,7 @@ pub const Node = struct {
         node.role = .leader;
         node.leader = node.config.id;
         const count_before = node.log.count;
+        const last_before = node.log.last_index();
         node_init.log_append(node, node.term, .normal, "") catch |err| switch (err) {
             error.LogFull => {},
         };
@@ -658,7 +583,7 @@ pub const Node = struct {
         if (count_after > count_before) {
             node.emit(.{ .append = node.log.entries[count_before..count_after] });
         }
-        leader_module.start(node, count_before);
+        leader_module.start(node, last_before);
         // A lone voter commits its own entry at once; with peers this is a no-op, so no send
         // precedes the `save_hard_state` it may emit.
         const commit_before = node.commit_index;
@@ -775,12 +700,14 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const commit_module = @import("commit.zig");
+const contract = @import("contract.zig");
 const election = @import("election.zig");
 const follower_module = @import("follower.zig");
 const interfaces = @import("../interfaces.zig");
 const leader_module = @import("leader.zig");
 const log_module = @import("../log.zig");
 const node_init = @import("node_init.zig");
+const snapshot_module = @import("snapshot.zig");
 const types = @import("../types.zig");
 
 const ConfError = types.ConfError;

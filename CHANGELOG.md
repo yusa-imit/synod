@@ -10,6 +10,13 @@ All notable changes to this project are documented in this file. Format follows
 - `log.Log` base index (plan 005 item 2): `Base`, `reset`, `compact`, `last_term`, `entry_at`,
   `range`; `term_at` returns `error.LogCompacted` below the base; `validate` checks the first
   entry sits at `base + 1` (new `InvariantBaseMalformed`). The node still runs with a zero base.
+- Node compaction policy (plan 005 item 3): `Config.snapshot_entries_min`/`snapshot_trailing`,
+  `Effect.snapshot_due` (snapshot phase 5, always last), `Input.snapshot_saved`,
+  `Status.snapshot_index`, `StepError.SnapshotUnexpected`,
+  `InvariantError.InvariantBaseBeyondApplied`; the node emits a due and compacts the log and
+  entry-byte arena on confirmation. The declarations moved to `raft/contract.zig` (re-exported
+  unchanged); commit, follower and leader paths use the log base. The driver ignores
+  `snapshot_due` until plan 005 item 4.
 
 ## [0.5.0] - 2026-10-27
 

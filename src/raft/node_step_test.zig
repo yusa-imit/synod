@@ -39,6 +39,7 @@ fn quiet_status(term_value: u64, vote: u64) Status {
         .commit_index = .zero,
         .applied_index = .zero,
         .last_index = idx(3),
+        .snapshot_index = .zero,
     };
 }
 
@@ -58,6 +59,10 @@ test "node: Effect.phase maps every variant to its ADR-007 phase" {
         .{ .effect = .{ .send = message }, .phase = .send },
         .{ .effect = .{ .apply = &one }, .phase = .apply },
         .{ .effect = .{ .leader_changed = node_id(2) }, .phase = .notify },
+        .{ .effect = .{ .snapshot_due = .{
+            .snapshot = .{ .index = idx(1), .term = term(1) },
+            .configuration = fixtures.configuration,
+        } }, .phase = .snapshot },
     };
     try testing.expectEqual(@typeInfo(Effect).@"union".fields.len, cases.len);
     for (cases) |case| try testing.expectEqual(case.phase, case.effect.phase());
@@ -373,6 +378,7 @@ fn describe_step_error(err: node_module.StepError) u8 {
         error.MessageConflictInvalid,
         => 1,
         error.StepMisrouted => 2,
+        error.SnapshotUnexpected => 2,
         error.ProposeNotLeader, error.ProposeTooLarge, error.ProposeLogFull => 3,
     };
 }
