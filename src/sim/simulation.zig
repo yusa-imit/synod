@@ -167,9 +167,10 @@ pub const Options = struct {
                 .inflight_max = 4,
                 .log_entries_max = 64,
                 .log_bytes_max = 64 * workload_module.command_bytes,
-                // The driver does not save snapshots yet (plan 005 item 4), so a due is ignored.
-                .snapshot_entries_min = 3,
-                .snapshot_trailing = 1,
+                // The sim state machine has no snapshot stream yet (`snapshot_bytes_max = 0`), so
+                // compaction is off. Plan 005 item 6 gives the sim real snapshots and turns it on.
+                .snapshot_entries_min = 0,
+                .snapshot_trailing = 0,
                 .message_limits = .{
                     .entries_max = 4,
                     .entry_bytes_max = workload_module.command_bytes,
@@ -256,7 +257,7 @@ pub const NodeError = raft.InvariantError || raft.InitError || raft.ReceiveError
     raft.ProposeError || Network.InvariantError || interfaces.LogStore.WriteError ||
     interfaces.LogStore.ReadError || interfaces.StateMachine.ApplyError ||
     CrashStore.InvariantError || workload_module.KvStateMachine.InvariantError ||
-    Workload.InvariantError;
+    Workload.InvariantError || Driver.Fault || Driver.InitError;
 
 /// `Options` the simulation refuses at `init`, before it allocates anything.
 pub const OptionsError = error{

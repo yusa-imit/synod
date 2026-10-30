@@ -12,8 +12,15 @@
 //! `Driver.init` over the same store (ADR-006 crash model). A rejected `receive` or `propose`
 //! (a `raft.StepError`) mutates nothing and does not stop the driver.
 //!
-//! Allocation: `init` allocates through the node and a scratch slice freed before it returns;
-//! no method allocates afterwards, and the driver stores no allocator.
+//! Snapshots (ADR-009): a `snapshot_due` effect, always the last of a step, is run as
+//! `StateMachine.snapshot` into `snapshot_buffer` (`message_limits.snapshot_bytes_max` bytes,
+//! allocated by `init`; one byte more is `SnapshotTooLarge`), `save_snapshot`, `sync`, then
+//! `step(.snapshot_saved)`, whose `Effects` are asserted empty. Any failure is a fail-stop
+//! `Fault` and the node is never told, so nothing compacts. `init` loads the store's snapshot,
+//! restores the state machine from it and replays only `(snapshot.index, commit]`.
+//!
+//! Allocation: `init` allocates through the node, the snapshot buffer and a scratch slice freed
+//! before it returns; no method allocates afterwards, and the driver stores no allocator.
 //!
 //! Time: `init` reads the clock once as the tick baseline. `poll` converts elapsed milliseconds
 //! into whole `tick_ms` ticks, carries the remainder, runs at most `ticks_per_poll_max`, and
@@ -24,6 +31,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const interfaces = @import("interfaces.zig");
+const log = @import("log.zig");
 const raft = @import("raft.zig");
 const types = @import("types.zig");
 
@@ -58,6 +66,8 @@ pub const Driver = struct {
     options: Options,
     /// Clock reading, in milliseconds, up to which ticks have been delivered.
     last_tick_ms: u64,
+    /// `snapshot_bytes_max` bytes the state machine snapshots into; owned, freed by `deinit`.
+    snapshot_buffer: []u8,
 
     /// `tick_ms` is the logical tick length; at most `ticks_per_poll_max` ticks run per `poll`.
     pub const Options = struct { tick_ms: u32, ticks_per_poll_max: u32 };
@@ -69,10 +79,13 @@ pub const Driver = struct {
         rng: Rng,
     };
     /// `LogStore.UpdateError` is a subset of `WriteError`.
-    pub const Fault = LogStore.WriteError || StateMachine.ApplyError;
+    pub const Fault = LogStore.WriteError || StateMachine.ApplyError || error{SnapshotTooLarge};
+    pub const InitError = raft.InitError || LogStore.ReadError || StateMachine.RestoreError;
 
-    /// Restores the node from `deps.store` (hard state and the whole log) and starts the tick
-    /// clock. Precondition: `options.tick_ms > 0` and `options.ticks_per_poll_max > 0`.
+    /// Restores the node from `deps.store` (hard state, snapshot if any, and the log above it),
+    /// restores the state machine from the snapshot and starts the tick clock. Precondition:
+    /// `options.tick_ms > 0` and `options.ticks_per_poll_max > 0`. Without a snapshot the node
+    /// starts from `configuration`; with one, from the snapshot's.
     pub fn init(
         driver: *Driver,
         io: Io,
@@ -81,49 +94,70 @@ pub const Driver = struct {
         options: Options,
         configuration: *const Configuration,
         deps: Deps,
-    ) (raft.InitError || LogStore.ReadError)!void {
+    ) InitError!void {
         _ = io; // Reserved by ADR-002: the only place real I/O would enter.
         assert(options.tick_ms > 0);
         assert(options.ticks_per_poll_max > 0);
 
+        const record = try deps.store.load_snapshot();
+        var base = log.Base.zero;
+        var restore_configuration = configuration.*;
+        if (record) |found| {
+            var reader = std.Io.Reader.fixed(found.snapshot.data);
+            try deps.state_machine.restore(&reader);
+            base = .{ .index = found.snapshot.index, .term = found.snapshot.term };
+            restore_configuration = found.configuration;
+        }
         const last_index = @intFromEnum(deps.store.last_index());
         // Store data, not a caller contract: refuse before sizing the scratch slice from it.
-        if (last_index > config.log_entries_max) return error.RestoreLogFull;
-        const last: usize = @intCast(last_index);
-        const scratch = try gpa.alloc(types.Entry, last);
+        if (last_index < @intFromEnum(base.index)) return error.StoreCorrupt;
+        const tail_len = last_index - @intFromEnum(base.index);
+        if (tail_len > config.log_entries_max) return error.RestoreLogFull;
+        const scratch = try gpa.alloc(types.Entry, @intCast(tail_len));
         defer gpa.free(scratch);
 
-        for (scratch, 1..) |*slot, index| slot.* = try deps.store.get(@enumFromInt(index));
+        for (scratch, @intFromEnum(base.index) + 1..) |*slot, index| {
+            slot.* = try deps.store.get(@enumFromInt(index));
+        }
         const restore: raft.Restore = .{
             .hard_state = try deps.store.load_hard_state(),
+            .snapshot = base,
             .entries = scratch,
-            .configuration = configuration.*,
+            .configuration = restore_configuration,
         };
         try driver.node.init(gpa, config, &restore, deps.rng);
+        errdefer driver.node.deinit(gpa);
 
+        const buffer_len: usize = @intCast(config.message_limits.snapshot_bytes_max);
+        driver.snapshot_buffer = try gpa.alloc(u8, buffer_len);
         driver.stopped = false;
         driver.deps = deps;
         driver.options = options;
         driver.last_tick_ms = deps.clock.now_ms();
         assert(!driver.stopped);
+        assert(driver.snapshot_buffer.len == config.message_limits.snapshot_bytes_max);
     }
 
     /// An upper bound, in bytes, on everything `init` allocates for `config`: the node's
-    /// allocations plus the restore scratch slice, alignment slack included (ADR-008).
-    /// The scratch slice (`log_entries_max` entries) is live while the node allocates, so the
-    /// two add up. Precondition: a coherent `config`.
+    /// allocations, the snapshot buffer and the restore scratch slice, alignment slack
+    /// included (ADR-008). The scratch slice (`log_entries_max` entries) is live while the node
+    /// allocates, so they all add up. Precondition: a coherent `config`.
     pub fn init_bytes_max(config: *const raft.Config) u64 {
         const node_bytes = raft.Node.init_bytes_max(config);
         const scratch_bytes = @as(u64, config.log_entries_max) * @sizeOf(types.Entry) +
             @alignOf(types.Entry) - 1;
         assert(node_bytes > 0);
         assert(scratch_bytes >= config.log_entries_max);
-        return node_bytes + scratch_bytes;
+        return node_bytes + scratch_bytes + config.message_limits.snapshot_bytes_max;
     }
 
     pub fn deinit(driver: *Driver, io: Io, gpa: Allocator) void {
         _ = io;
+        assert(driver.node.effects.len > 0);
+        gpa.free(driver.snapshot_buffer);
+        driver.snapshot_buffer = &.{};
         driver.node.deinit(gpa);
+        assert(driver.snapshot_buffer.len == 0);
     }
 
     /// Delivers `message` to the node and executes the effects. Precondition: not stopped.
@@ -183,6 +217,40 @@ pub const Driver = struct {
         }
     }
 
+    /// Runs a `snapshot_due`: the state machine into `snapshot_buffer`, `save_snapshot`, `sync`,
+    /// then `snapshot_saved` to the node. Precondition: nothing is unsynced and `due` is the last
+    /// effect of the step (it borrows node storage that `snapshot_saved` is allowed to move).
+    fn snapshot_save(driver: *Driver, due: *const raft.SnapshotDue) Fault!void {
+        assert(!driver.stopped);
+        assert(due.snapshot.index != .zero);
+        assert(due.snapshot.term != .zero);
+        const store = driver.deps.store;
+        var writer = std.Io.Writer.fixed(driver.snapshot_buffer);
+
+        driver.deps.state_machine.snapshot(&writer) catch |err| switch (err) {
+            error.WriteFailed => return error.SnapshotTooLarge,
+            error.StateMachineFailed => return error.StateMachineFailed,
+        };
+        writer.flush() catch |err| switch (err) {
+            error.WriteFailed => return error.SnapshotTooLarge,
+        };
+        const snapshot: types.Snapshot = .{
+            .index = due.snapshot.index,
+            .term = due.snapshot.term,
+            .data = writer.buffered(),
+        };
+        const index = due.snapshot.index;
+        try store.save_snapshot(&snapshot, &due.configuration);
+        try store.sync();
+
+        // The node emitted `due` for exactly `index` and none was confirmed since, so no
+        // `StepError` applies to `snapshot_saved`.
+        const input: raft.Input = .{ .snapshot_saved = index };
+        const confirmed = driver.node.step(input) catch unreachable; // proof: see above.
+        assert(confirmed.items.len == 0);
+        assert(driver.node.status().snapshot_index == index);
+    }
+
     /// Runs one step's effects in order. The persist phase sets `unsynced`; the first later
     /// effect of a send or apply phase is preceded by exactly one `sync`.
     fn execute(driver: *Driver, effects: Effects) Fault!void {
@@ -209,9 +277,8 @@ pub const Driver = struct {
                     for (entries) |*entry| try driver.deps.state_machine.apply(entry);
                 },
                 .leader_changed => {},
-                // Item 4 (plan 005) implements the save path; until then the due stays pending
-                // and `snapshot_saved` is never sent, so nothing compacts.
-                .snapshot_due => {},
+                // The last effect of the step (ADR-009): `snapshot_saved` replaces the view.
+                .snapshot_due => |*due| try driver.snapshot_save(due),
             }
             if (phase == .persist) unsynced = true;
         }

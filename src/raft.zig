@@ -20,6 +20,7 @@ pub const Restore = node.Restore;
 pub const Input = node.Input;
 pub const Effect = node.Effect;
 pub const Effects = node.Effects;
+pub const SnapshotDue = node.SnapshotDue;
 pub const Role = node.Role;
 pub const Status = node.Status;
 pub const Node = node.Node;

@@ -28,9 +28,11 @@ pub const Config = struct {
     /// Bytes in the node-owned entry-byte arena.
     log_bytes_max: u32,
     /// A snapshot is due once `applied - log.base.index >= this`; in `1..log_entries_max-1`.
+    /// Zero turns compaction off (no due is ever emitted) for a harness whose state machine
+    /// cannot snapshot yet (the simulator, until plan 005 item 6); a real node never sets it.
     snapshot_entries_min: u32,
     /// Entries kept at or below a saved snapshot for slightly lagging peers; below
-    /// `snapshot_entries_min`.
+    /// `snapshot_entries_min` (zero when compaction is off).
     snapshot_trailing: u32,
     /// Validates every received `Message` and bounds every batch.
     message_limits: Message.Limits,
@@ -39,7 +41,10 @@ pub const Config = struct {
 /// State recovered from the store, borrowed for the `init` call only; `init` copies all of it.
 pub const Restore = struct {
     hard_state: HardState,
-    /// The whole log, contiguous from index 1.
+    /// The last entry the store's snapshot covers (`Base.zero` when there is none). The node
+    /// starts with that index committed, applied and snapshotted, and its log based there.
+    snapshot: log_module.Base,
+    /// The log above `snapshot.index`, contiguous from `snapshot.index + 1`.
     entries: []const Entry,
     configuration: Configuration,
 };

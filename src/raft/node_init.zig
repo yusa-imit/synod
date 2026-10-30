@@ -31,9 +31,12 @@ pub fn assert_config(config: *const Config) void {
     assert(config.learners_max <= types.learners_max);
     assert(config.inflight_max > 0);
     assert(config.log_entries_max > 0);
-    assert(config.snapshot_entries_min >= 1);
     assert(config.snapshot_entries_min < config.log_entries_max);
-    assert(config.snapshot_trailing < config.snapshot_entries_min);
+    if (config.snapshot_entries_min == 0) {
+        assert(config.snapshot_trailing == 0); // Compaction off (see `Config`).
+    } else {
+        assert(config.snapshot_trailing < config.snapshot_entries_min);
+    }
 }
 
 /// `peers_max = 2 * voters_max + learners_max - 1`: joint-sized so Phase 4 changes no size.
@@ -122,20 +125,38 @@ pub fn restore_validate(config: *const Config, restore: *const Restore) InitErro
     if (configuration.learners.len > config.learners_max) return error.ConfLearnersTooMany;
 
     const hard_state = &restore.hard_state;
+    const base = restore.snapshot;
     if (hard_state.vote != .none and hard_state.term == .zero) return error.RestoreInconsistent;
-    var previous_term: Term = .zero;
-    for (restore.entries, 0..) |entry, i| {
-        if (@intFromEnum(entry.index) != i + 1) return error.RestoreInconsistent;
+    if ((base.index == .zero) != (base.term == .zero)) return error.RestoreInconsistent;
+    if (base.term.order(hard_state.term) == .gt) return error.RestoreInconsistent;
+    if (@intFromEnum(base.index) > std.math.maxInt(u64) - restore.entries.len) {
+        return error.RestoreInconsistent;
+    }
+    var previous_term: Term = base.term;
+    for (restore.entries, 1..) |entry, offset| {
+        if (@intFromEnum(entry.index) != @intFromEnum(base.index) + offset) {
+            return error.RestoreInconsistent;
+        }
         if (entry.term == .zero) return error.RestoreInconsistent;
         if (entry.term.order(previous_term) == .lt) return error.RestoreInconsistent;
         if (entry.term.order(hard_state.term) == .gt) return error.RestoreInconsistent;
         previous_term = entry.term;
     }
-    if (@intFromEnum(hard_state.commit_index) > restore.entries.len) {
-        return error.RestoreInconsistent;
-    }
-    assert(@intFromEnum(hard_state.commit_index) <= restore.entries.len);
+    const last = @intFromEnum(base.index) + restore.entries.len;
+    if (@intFromEnum(hard_state.commit_index) > last) return error.RestoreInconsistent;
+    assert(@intFromEnum(hard_state.commit_index) <= last);
     assert(previous_term.order(hard_state.term) != .gt);
+}
+
+/// The commit index a restored node starts with: the larger of the saved one and the
+/// snapshot's (a crash may have lost the install's commit save, ADR-009 "Restart").
+pub fn restore_commit(restore: *const Restore) Index {
+    const saved = restore.hard_state.commit_index;
+    const from_snapshot = restore.snapshot.index;
+    const result = if (saved.order(from_snapshot) == .gt) saved else from_snapshot;
+    assert(result.order(saved) != .lt);
+    assert(result.order(restore.snapshot.index) != .lt);
+    return result;
 }
 
 /// Copies `source` into `members` (voters, then outgoing voters, then learners) and returns the
@@ -182,6 +203,7 @@ pub fn is_member(node: *const Node, id: NodeId) bool {
 pub fn restore_entries(node: *Node, restore: *const Restore) error{RestoreLogFull}!void {
     assert(node.log.count == 0);
     assert(node.bytes_used == 0);
+    assert(node.log.last_index() == restore.snapshot.index);
     for (restore.entries) |entry| {
         log_append(node, entry.term, entry.kind, entry.data) catch |err| switch (err) {
             error.LogFull => return error.RestoreLogFull,
@@ -274,6 +296,7 @@ const Configuration = types.Configuration;
 const Effect = node_module.Effect;
 const Entry = types.Entry;
 const EntryKind = types.EntryKind;
+const Index = types.Index;
 const InitError = node_module.InitError;
 const InvariantError = node_module.InvariantError;
 const Node = node_module.Node;

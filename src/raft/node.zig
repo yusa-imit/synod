@@ -106,7 +106,9 @@ pub const Node = struct {
     rounds: leader_module.Rounds,
 
     /// Initializes `node` in place from `config`, `restore` and the injected `rng`, copying all
-    /// of `restore`. The node starts a follower with `applied_index == .zero`.
+    /// of `restore`. The node starts a follower with `commit_index = max(hard_state.commit,
+    /// snapshot.index)` and `applied_index == snapshot_index == snapshot.index` (zero without a
+    /// snapshot), its log based at `restore.snapshot`.
     /// Preconditions (asserted): a coherent `config` (see `Config`). `restore` is data:
     /// `Conf*`, `RestoreInconsistent` and `RestoreLogFull` are returned, and a failure leaves
     /// nothing allocated. The election timeout is drawn once from `rng`.
@@ -151,9 +153,9 @@ pub const Node = struct {
             .term = restore.hard_state.term,
             .vote = restore.hard_state.vote,
             .leader = .none,
-            .commit_index = restore.hard_state.commit_index,
-            .applied_index = .zero,
-            .snapshot_index = .zero,
+            .commit_index = node_init.restore_commit(restore),
+            .applied_index = restore.snapshot.index,
+            .snapshot_index = restore.snapshot.index,
             .snapshot_pending = .zero,
             .log = log,
             .election_timeout = node_init.election_timeout_draw(rng, config.election_ticks),
@@ -172,10 +174,12 @@ pub const Node = struct {
             .progress_len = 0,
             .rounds = leader_storage.rounds,
         };
+        node.log.reset(restore.snapshot);
         try node_init.restore_entries(node, restore);
 
         assert(node.role == .follower);
-        assert(node.applied_index == .zero);
+        assert(node.applied_index == restore.snapshot.index);
+        assert(node.commit_index.order(node.applied_index) != .lt);
         assert(node.log.count == restore.entries.len);
     }
 
