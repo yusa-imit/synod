@@ -37,7 +37,7 @@ Every code item is one PR with a failing test first; `zig build test`, `zig fmt 
       entries; `check_invariants` adds `base <= applied`. In `src/raft/snapshot.zig`: `node.zig`
       is at its 800-line cap. *Failing test first:* a `log_entries_max = 64` node commits and
       applies 500 proposals (red today with `ProposeLogFull`).
-- [ ] 4. **4A-i Driver snapshot path, restart from a snapshot.** Snapshot into a buffer sized
+- [x] 4. **4A-i Driver snapshot path, restart from a snapshot.** Snapshot into a buffer sized
       at `init`, save, sync, confirm; `Driver.init` restores the state machine from the store's
       snapshot and replays only `(base, commit]`. *Failing test first:* restart over a store
       with a snapshot at 400 plus 20 entries matches a never-crashed replica's KV digest; a

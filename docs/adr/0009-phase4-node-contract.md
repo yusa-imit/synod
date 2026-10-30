@@ -42,8 +42,8 @@ requires `prev_log_index >= base.index` (callers trim, below). `validate`: first
 
 ```zig
 pub const Config = struct { ...,
-    snapshot_entries_min: u32, // 1 ..< log_entries_max: due when applied - log base >= it
-    snapshot_trailing: u32, // < snapshot_entries_min: entries kept at or below the snapshot
+    snapshot_entries_min: u32, // 1 ..< log_entries_max, due when applied - base >= it; 0 = off
+    snapshot_trailing: u32, // < snapshot_entries_min (0 when off): entries kept below the snapshot
     reads_max: u32 }; // >= 1; snapshot_bytes_max stays message_limits' (<= maxInt(u32))
 pub const Restore = struct { hard_state: HardState,
     snapshot: log.Base, // the store's snapshot; .zero when none
@@ -90,6 +90,9 @@ pub const Driver = struct { ..., // src/driver.zig
 };
 ```
 
+- **Compaction off (amended in item 4).** `snapshot_entries_min == 0` means no due is ever
+  emitted, with `snapshot_trailing == 0`. Only a harness whose state machine cannot snapshot
+  sets it (the simulator, until plan 005 item 6 removes it); a real node never does.
 - **Effects: `peers_max + 9` slots** (`effects_fixed_count = 9`). Worst step: a deposed
   leader takes a conflicting batch from a higher term: `save_hard_state`, `truncate`,
   `append`, `save_hard_state`, one `send`, `apply`, `read_failed`, two `leader_changed`,

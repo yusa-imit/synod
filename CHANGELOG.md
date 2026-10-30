@@ -15,10 +15,17 @@ All notable changes to this project are documented in this file. Format follows
   `Status.snapshot_index`, `StepError.SnapshotUnexpected`,
   `InvariantError.InvariantBaseBeyondApplied`; the node emits a due and compacts the log and
   entry-byte arena on confirmation. The declarations moved to `raft/contract.zig` (re-exported
-  unchanged); commit, follower and leader paths use the log base. The driver ignores
-  `snapshot_due` until plan 005 item 4. A save step now emits nothing (ADR-009); a due owed
-  then is emitted by the next step. A follower request ending at a compacted base is checked
-  against the base term.
+  unchanged); commit, follower and leader paths use the log base. A save step now emits
+  nothing (ADR-009); a due owed then is emitted by the next step. A follower request
+  ending at a compacted base is checked against the base term.
+- Driver snapshot path (plan 005 item 4): on `snapshot_due` the driver snapshots the state
+  machine into a buffer sized at `init` (`snapshot_bytes_max`), saves, syncs and confirms;
+  one over the buffer is `Fault.SnapshotTooLarge` (fail-stop). `Driver.init` restores the state
+  machine from the store's snapshot and replays only the tail above it; `Restore.snapshot`
+  carries the base (breaking: add `.snapshot = .zero` to existing `Restore` literals),
+  `Driver.InitError` gains the restore and `load_snapshot` errors, `init_bytes_max` grows by
+  `snapshot_bytes_max`. `snapshot_entries_min == 0` turns compaction off for harnesses whose
+  state machine cannot snapshot yet (the simulator, until item 6).
 
 ## [0.5.0] - 2026-10-27
 
