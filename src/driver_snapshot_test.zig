@@ -853,7 +853,8 @@ test "driver snapshot: after SnapshotTooLarge a restart with a big enough buffer
     try testing.expectEqualStrings("SnapshotTooLarge", @errorName(err));
     try expect_failed_stop(&rig);
 
-    rig.spec.buffer = size; // The only recovery is a fresh init over the same store (ADR-006).
+    // The only recovery is a fresh init over the same store (ADR-006).
+    rig.spec.buffer = snapshot_full_bytes;
     try rig.restart(testing.allocator);
     try rig.catch_up();
     try rig.elect();
@@ -897,6 +898,14 @@ fn fault_case(fault: Fault, want: []const u8) !void {
     disarm(&rig);
     rig.sm.fail_snapshot = false;
     try rig.restart(testing.allocator);
+    if (fault == .store_full) {
+        // The store stays too small: replay hits the same snapshot and fails stop again.
+        rig.catch_up() catch |replay_err| {
+            try testing.expectEqualStrings(want, @errorName(replay_err));
+            return;
+        };
+        return error.TestUnexpectedResult;
+    }
     try rig.catch_up();
     try rig.driver.node.check_invariants();
 }
