@@ -122,6 +122,7 @@ pub fn command_event(
         error.StoreFull,
         error.StoreIoFailed,
         error.StateMachineFailed,
+        error.SnapshotTooLarge,
         => {
             const logged: Index = @enumFromInt(@intFromEnum(last_index) + 1);
             invoke(workload, &command, slot, logged, event_index);

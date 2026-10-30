@@ -26,6 +26,7 @@ pub fn emit_due(node: *Node) void {
     assert(node.applied_index.order(node.log.last_index()) != .gt);
     assert(node.effects_len < node.effects.len);
     if (node.snapshot_pending != .zero) return;
+    if (node.config.snapshot_entries_min == 0) return; // Compaction off (see `Config`).
 
     const base = @intFromEnum(node.log.base.index);
     const applied = @intFromEnum(node.applied_index);

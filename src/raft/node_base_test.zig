@@ -35,6 +35,8 @@ fn config_of() Config {
     result.log_entries_max = 16;
     result.log_bytes_max = 64;
     result.message_limits.entries_max = 8;
+    result.snapshot_entries_min = 7; // Compaction on: the fixture default turns it off.
+    result.snapshot_trailing = 3;
     return result;
 }
 

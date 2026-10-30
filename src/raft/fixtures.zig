@@ -100,8 +100,8 @@ pub const config: Config = .{
     .inflight_max = 4,
     .log_entries_max = 8,
     .log_bytes_max = 64,
-    .snapshot_entries_min = 7,
-    .snapshot_trailing = 3,
+    .snapshot_entries_min = 0, // Compaction off: fixture state machines cannot snapshot.
+    .snapshot_trailing = 0,
     .message_limits = .{ .entries_max = 4, .entry_bytes_max = 32, .snapshot_bytes_max = 128 },
 };
 
@@ -121,7 +121,12 @@ pub fn restore_with(
     hard_state: HardState,
     entries: []const Entry,
 ) Restore {
-    return .{ .hard_state = hard_state, .entries = entries, .configuration = cluster };
+    return .{
+        .hard_state = hard_state,
+        .snapshot = .zero,
+        .entries = entries,
+        .configuration = cluster,
+    };
 }
 
 /// Five voters {1..5}, no learners, for quorum-of-three tests. The node under test is id 1.
