@@ -10,7 +10,9 @@
 //! Saved (`saved`): the driver saved and synced the snapshot at the pending index. The node
 //! records `snapshot_index`, compacts the log through `max(base, index -| snapshot_trailing)`
 //! and re-packs the entry-byte arena once so the live entries start at offset zero again. It
-//! emits nothing. Any other index, or none pending, is `SnapshotUnexpected` with no mutation.
+//! emits nothing, and `Node.step` skips `emit_due` for that step (the driver asserts the
+//! `Effects` of a save empty, ADR-009), so a due owed by then waits for the next step. Any other
+//! index, or none pending, is `SnapshotUnexpected` with no mutation.
 //!
 //! Invariants: `log.base.index <= snapshot_index <= applied_index`; the arena stays packed in
 //! index order (`check_invariants_bytes`); compaction never grows `bytes_used` or the log.
@@ -22,7 +24,7 @@
 /// the log and a free effect slot exists (`effects_fixed_count` reserves it).
 pub fn emit_due(node: *Node) void {
     assert(node.applied_index.order(node.log.last_index()) != .gt);
-    assert(node.effects_len <= node.effects.len);
+    assert(node.effects_len < node.effects.len);
     if (node.snapshot_pending != .zero) return;
     if (node.config.snapshot_entries_min == 0) return; // Compaction off (see `Config`).
 
@@ -55,6 +57,7 @@ pub fn saved(node: *Node, index: Index) error{SnapshotUnexpected}!void {
 
     assert(index.order(node.applied_index) != .gt); // It was applied when it was named.
     assert(index.order(node.snapshot_index) == .gt);
+    assert(index.order(node.log.base.index) == .gt); // `snapshot_index >= base`, and it grows.
     node.effects_len = 0;
     node.snapshot_pending = .zero;
     node.snapshot_index = index;
@@ -62,6 +65,7 @@ pub fn saved(node: *Node, index: Index) error{SnapshotUnexpected}!void {
     const through = @max(@intFromEnum(node.log.base.index), keep_from);
     compact(node, @enumFromInt(through));
     assert(node.log.base.index.order(node.snapshot_index) != .gt);
+    assert(node.effects_len == 0); // ADR-009: the driver asserts this step's Effects empty.
 }
 
 /// Drops the log through `through` and re-packs the arena. Preconditions: `base.index <=

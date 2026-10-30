@@ -95,7 +95,8 @@ pub const Driver = struct { // src/driver.zig, the std.Io boundary (ADR-002)
   Per step, in this order: at most one `truncate`, `append`, `save_hard_state` (skipped when
   `eql` to the last emitted; at most two per step, a term change and a commit advance), one
   `send` per peer, one `apply`, one `leader_changed` (two for a deposed leader's successor).
-  The follower's worst step has eight effects, which `+ 7` covers. `phase()`
+  The follower's worst step has eight effects, which `+ 7` covers (amended by ADR-009:
+  `peers_max + 9` slots, for `snapshot_due` and the second `leader_changed`). `phase()`
   is non-decreasing, asserted on emit (node) and on execute (driver). `Effects` and every slice
   it reaches borrow node memory until the next `step()`/`deinit()`; the driver finishes first.
 - **The node owns entry bytes**: `log_bytes_max`, allocated at `init`, packed in index order.
