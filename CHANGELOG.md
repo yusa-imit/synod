@@ -26,6 +26,13 @@ All notable changes to this project are documented in this file. Format follows
   `Driver.InitError` gains the restore and `load_snapshot` errors, `init_bytes_max` grows by
   `snapshot_bytes_max`. `snapshot_entries_min == 0` turns compaction off for harnesses whose
   state machine cannot snapshot yet (the simulator, until item 6).
+- InstallSnapshot (plan 005 item 5): a peer whose `next <= base` enters progress `snapshot` and
+  gets one `Effect.send_snapshot` per round timeout, then probes from `match + 1`; a follower
+  acks a snapshot at or below `commit` without installing, else emits `save_snapshot`,
+  `restore` (apply phase, before any `apply`) and the reply. `Effect` gains `save_snapshot`,
+  `send_snapshot` (the driver reads the stored record) and `restore`; `Driver.Fault` gains the
+  `LogStore.ReadError` and `StateMachine.RestoreError` sets; a follower trims an
+  `append_entries` that starts below its base.
 
 ## [0.5.0] - 2026-10-27
 
