@@ -160,9 +160,10 @@ pub fn step_response(node: *Node, reply: *const AppendResponse) void {
 
     const peer = reply.header.from;
     const slot = slot_of(node, peer) orelse return;
+    const p = &node.progress[slot];
+    if (p.state == .snapshot) return; // The one round in flight is an install, not an append.
     const at = live_record(node, slot, reply.round) orelse return;
     const round = node.rounds.records[records_base(node, slot) + at];
-    const p = &node.progress[slot];
     switch (reply.outcome) {
         .accepted => |matched| {
             const m = @intFromEnum(matched);
@@ -182,6 +183,25 @@ pub fn step_response(node: *Node, reply: *const AppendResponse) void {
         },
     }
     assert(p.inflight_count <= p.inflight_max);
+    assert(node.effects_len <= 2); // At most `save_hard_state` and one send.
+}
+
+/// Handles one `install_snapshot_response`. Preconditions: the node leads and the response is at
+/// our term. Only the ack of exactly the snapshot in flight counts (`Progress.on_snapshot_acked`,
+/// keyed by our own `next`, never trusted from the peer); it resumes the peer at `match + 1`.
+pub fn step_snapshot_response(node: *Node, reply: *const SnapshotResponse) void {
+    assert(node.role == .leader);
+    assert(reply.header.term == node.term);
+
+    const peer = reply.header.from;
+    const slot = slot_of(node, peer) orelse return;
+    const p = &node.progress[slot];
+    if (!p.on_snapshot_acked(reply.match_index)) return;
+
+    node.rounds.records[records_base(node, slot)] = Round.empty; // The install's record.
+    commit_module.advance_leader(node); // A new match may complete a quorum.
+    if (p.next.order(node.log.last_index()) != .gt) send_slot(node, slot, peer);
+    assert(p.state != .snapshot);
     assert(node.effects_len <= 2); // At most `save_hard_state` and one send.
 }
 
@@ -292,11 +312,17 @@ fn send_slot(node: *Node, slot: u32, peer: NodeId) void {
     if (!p.can_send()) return;
 
     const last = @intFromEnum(node.log.last_index());
-    const first = @intFromEnum(p.next) - 1; // `next >= 1` is a `Progress` invariant.
+    var first = @intFromEnum(p.next) - 1; // `next >= 1` is a `Progress` invariant.
     assert(first <= last); // The leader's log is the longest a peer can match.
-    // A peer behind the compacted prefix needs an InstallSnapshot (plan 005 item 5): until that
-    // lands it gets nothing, and the log keeps `snapshot_trailing` entries for slight lag.
-    if (first < @intFromEnum(node.log.base.index)) return;
+    // A peer behind the compacted prefix needs an InstallSnapshot (plan 005 item 5); the log
+    // keeps `snapshot_trailing` entries for slight lag. A pipelining peer waits for its window
+    // to time out; an idle one falls back to probing, which may land inside the log.
+    if (first < @intFromEnum(node.log.base.index) and p.state == .replicate) {
+        if (p.inflight_count > 0) return;
+        p.on_timeout();
+        first = @intFromEnum(p.next) - 1;
+    }
+    if (first < @intFromEnum(node.log.base.index)) return snapshot_module.send(node, slot, peer);
     const stop = @min(last, first + node.config.message_limits.entries_max);
     const prev_term = node.log.term_at(@enumFromInt(first)) catch |err| switch (err) {
         // `first >= log.base.index` was just checked.
@@ -334,16 +360,36 @@ fn round_expire(node: *Node, slot: u32) void {
     assert(oldest.sent_tick <= node.rounds.ticks);
     const age_max = switch (p.state) {
         .probe => node.config.heartbeat_ticks,
-        .replicate => node.config.election_ticks,
+        .replicate, .snapshot => node.config.election_ticks,
     };
     if (node.rounds.ticks - oldest.sent_tick < age_max) return;
 
+    const was_snapshot = p.state == .snapshot;
     p.on_timeout();
     assert(p.inflight_count == 0); // No live record is left: the window and records are one.
+    // An unanswered install is resent at once, not on the next heartbeat.
+    if (was_snapshot) send_slot(node, slot, peer_of(node, slot));
+}
+
+/// The peer of progress `slot`, in `send_all` order. Precondition: `slot < progress_len`.
+fn peer_of(node: *const Node, slot: u32) NodeId {
+    assert(slot < node.progress_len);
+    var next: u32 = 0;
+    for (node.configuration.voters) |voter| {
+        if (voter == node.config.id) continue;
+        if (next == slot) return voter;
+        next += 1;
+    }
+    for (node.configuration.voters_outgoing) |voter| {
+        if (!is_outgoing_peer(node, voter)) continue;
+        if (next == slot) return voter;
+        next += 1;
+    }
+    unreachable; // `progress_len == peers_count` (`check_invariants`), so every slot has a peer.
 }
 
 /// The index in `Rounds.records` of `slot`'s first record.
-fn records_base(node: *const Node, slot: u32) usize {
+pub fn records_base(node: *const Node, slot: u32) usize {
     assert(slot < node.progress.len);
     const base = @as(usize, slot) * node.config.inflight_max;
     assert(base + node.config.inflight_max <= node.rounds.records.len);
@@ -378,6 +424,7 @@ const election = @import("election.zig");
 const node_init = @import("node_init.zig");
 const node_module = @import("node.zig");
 const progress_module = @import("progress.zig");
+const snapshot_module = @import("snapshot.zig");
 const types = @import("../types.zig");
 
 const AppendResponse = types.AppendResponse;
@@ -386,4 +433,5 @@ const Index = types.Index;
 const InvariantError = node_module.InvariantError;
 const Node = node_module.Node;
 const NodeId = types.NodeId;
+const SnapshotResponse = types.SnapshotResponse;
 const Progress = progress_module.Progress;

@@ -53,6 +53,7 @@ pub const Config = contract.Config;
 pub const Restore = contract.Restore;
 pub const Input = contract.Input;
 pub const SnapshotDue = contract.SnapshotDue;
+pub const SnapshotSend = contract.SnapshotSend;
 pub const Effect = contract.Effect;
 pub const Effects = contract.Effects;
 pub const Role = contract.Role;
@@ -301,10 +302,14 @@ pub const Node = struct {
                     leader_module.step_response(node, reply);
                 }
             },
-            // Not yet handled (snapshots): only the term rules apply.
-            .install_snapshot,
-            .install_snapshot_response,
-            => node.step_term_only(head, member),
+            // InstallSnapshot (`snapshot.zig`, plan 005 item 5).
+            .install_snapshot => |*request| try snapshot_module.step_install(node, request, member),
+            .install_snapshot_response => |*reply| {
+                node.step_term_only(head, member);
+                if (node.role == .leader and head.term == node.term) {
+                    leader_module.step_snapshot_response(node, reply);
+                }
+            },
         }
         assert(node.effects_len <= node.effects.len);
     }

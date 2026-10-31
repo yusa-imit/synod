@@ -84,7 +84,7 @@ pub fn step_append(node: *Node, request: *const AppendRequest, member: bool) voi
 
 /// The sender is the leader of our term if it is a voter, we do not lead, and no other leader
 /// was named this term. Then we follow it with a fresh timer. Returns whether the claim stands.
-fn claim_leader(node: *Node, from: NodeId) bool {
+pub fn claim_leader(node: *Node, from: NodeId) bool {
     assert(from != node.config.id);
     assert(node.effects_len <= node.effects.len);
     if (!node_init.is_voter(node, from)) return false;
@@ -101,7 +101,7 @@ fn claim_leader(node: *Node, from: NodeId) bool {
 
 /// Emits the `leader_changed` effects of the step, last. Adopting a higher term forgot the
 /// leader we knew (`leader_changed(.none)`); a claim then names the new one.
-fn notify_leader(node: *Node, leader_before: NodeId, bumped: bool) void {
+pub fn notify_leader(node: *Node, leader_before: NodeId, bumped: bool) void {
     assert(node.effects_len <= node.effects.len - 2);
     assert(!bumped or node.role != .leader);
     const known = if (bumped) NodeId.none else leader_before;
