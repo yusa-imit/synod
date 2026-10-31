@@ -123,6 +123,11 @@ pub fn command_event(
         error.StoreIoFailed,
         error.StateMachineFailed,
         error.SnapshotTooLarge,
+        // A propose step emits no `restore` or `send_snapshot`, but the sets are one `Fault`.
+        error.StoreCorrupt,
+        error.ReadFailed,
+        error.EndOfStream,
+        error.StateMachineSnapshotInvalid,
         => {
             const logged: Index = @enumFromInt(@intFromEnum(last_index) + 1);
             invoke(workload, &command, slot, logged, event_index);

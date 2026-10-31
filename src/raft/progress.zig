@@ -10,7 +10,9 @@
 
 /// `.probe`: the follower's log position is unknown, send one request at a time.
 /// `.replicate`: the position is known, pipeline up to `inflight_max` requests.
-pub const State = enum(u8) { probe, replicate };
+/// `.snapshot`: an `install_snapshot` is in flight (one, counted in `inflight_count`); nothing
+/// else is sent until it is acked or its round times out.
+pub const State = enum(u8) { probe, replicate, snapshot };
 
 pub const Progress = struct {
     match: Index,
@@ -50,6 +52,7 @@ pub const Progress = struct {
         return switch (p.state) {
             .probe => p.inflight_count == 0,
             .replicate => p.inflight_count < p.inflight_max,
+            .snapshot => false,
         };
     }
 
@@ -66,6 +69,7 @@ pub const Progress = struct {
         switch (p.state) {
             .probe => {},
             .replicate => p.next = last_sent.next(),
+            .snapshot => unreachable, // `can_send()` is false in `.snapshot`.
         }
         assert(p.inflight_count <= p.inflight_max);
         assert(@intFromEnum(p.next) > @intFromEnum(p.match));
@@ -126,6 +130,7 @@ pub const Progress = struct {
         assert(@intFromEnum(p.next) >= 1);
         assert(p.inflight_count <= p.inflight_max);
 
+        if (p.state == .snapshot) return false; // No append is in flight to be rejected.
         if (prev <= @intFromEnum(p.match)) return false;
         if (prev >= @intFromEnum(p.next)) return false;
         if (p.state == .probe and prev != @intFromEnum(p.next) - 1) return false;
@@ -153,9 +158,42 @@ pub const Progress = struct {
         assert(p.next != Index.zero);
     }
 
-    /// A probe or heartbeat round expired with no response. Without this, lost messages would
-    /// keep the window full forever. Discards the window and goes back to `.probe` at
-    /// `match + 1`, so `can_send()` is true again. Valid in any state, idempotent.
+    /// An `install_snapshot` at `snapshot_index` went out. `next` moves past it, the state
+    /// becomes `.snapshot` and the one message counts in flight. Preconditions: nothing is in
+    /// flight and `snapshot_index` is above `match` and below `maxInt(u64)`.
+    pub fn on_snapshot_sent(p: *Progress, snapshot_index: Index) void {
+        assert(p.inflight_count == 0);
+        assert(@intFromEnum(snapshot_index) > @intFromEnum(p.match));
+        assert(@intFromEnum(snapshot_index) < std.math.maxInt(u64));
+
+        p.state = .snapshot;
+        p.next = snapshot_index.next();
+        p.inflight_count = 1;
+        assert(p.inflight_count <= p.inflight_max);
+        assert(!p.can_send());
+    }
+
+    /// The follower acked an installed snapshot at `match_index`. Only the ack of exactly the
+    /// snapshot in flight (`match_index == next - 1`, state `.snapshot`) counts: then `match`
+    /// is `match_index`, `next` stays past it, nothing is in flight and the state is `.probe`.
+    /// Anything else changes nothing and returns false.
+    pub fn on_snapshot_acked(p: *Progress, match_index: Index) bool {
+        assert(@intFromEnum(p.next) >= 1);
+        assert(p.inflight_count <= p.inflight_max);
+        if (p.state != .snapshot) return false;
+        if (@intFromEnum(match_index) != @intFromEnum(p.next) - 1) return false;
+
+        p.match = match_index;
+        p.state = .probe;
+        p.inflight_count = 0;
+        assert(@intFromEnum(p.next) > @intFromEnum(p.match));
+        assert(p.can_send());
+        return true;
+    }
+
+    /// A probe, heartbeat or snapshot round expired with no response. Without this, lost
+    /// messages would keep the window full forever. Discards the window and goes back to
+    /// `.probe` at `match + 1`, so `can_send()` is true again. Valid in any state, idempotent.
     pub fn on_timeout(p: *Progress) void {
         assert(is_valid(p)); // Caller contract: `p` is a valid tracker.
         assert(p.inflight_count <= p.inflight_max);
@@ -185,7 +223,7 @@ pub const Progress = struct {
         if (p.next == Index.zero) return error.InvariantProgressOrder;
         if (@intFromEnum(p.match) >= @intFromEnum(p.next)) return error.InvariantProgressOrder;
         if (p.inflight_count > p.inflight_max) return error.InvariantInflightOverflow;
-        if (p.state == .probe and p.inflight_count > 1) return error.InvariantInflightOverflow;
+        if (p.state != .replicate and p.inflight_count > 1) return error.InvariantInflightOverflow;
 
         assert(@intFromEnum(p.next) > @intFromEnum(p.match)); // Every rule above passed.
         assert(p.state == .replicate or p.inflight_count <= 1);

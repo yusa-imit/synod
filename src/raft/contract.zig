@@ -60,6 +60,14 @@ pub const Input = union(enum) {
     snapshot_saved: Index,
 };
 
+/// A snapshot the leader asks the driver to send (ADR-009 "InstallSnapshot"): the driver reads
+/// the stored record, checks it is exactly `snapshot`, and sends an `install_snapshot` with
+/// `header` and the record's data and configuration (`StoreCorrupt` on a mismatch).
+pub const SnapshotSend = struct {
+    header: Header,
+    snapshot: log_module.Base,
+};
+
 /// A snapshot the node asks the driver to take: the state machine as of `snapshot.index`.
 pub const SnapshotDue = struct {
     /// `(applied, term of the entry at applied)`.
@@ -81,6 +89,13 @@ pub const Effect = union(enum) {
     leader_changed: NodeId,
     /// Snapshot phase: at most one per step, always the last effect.
     snapshot_due: SnapshotDue,
+    /// Persist phase. An installed snapshot; `snapshot.data` borrows `Input.message`.
+    save_snapshot: interfaces.SnapshotRecord,
+    /// Send phase. The driver fills the data from the store (`SnapshotSend`).
+    send_snapshot: SnapshotSend,
+    /// Apply phase. Restore the state machine from the snapshot just saved at this index;
+    /// before any `apply`.
+    restore: Index,
 
     /// Execution phases: the persist phase, then send, then apply, then notify, then snapshot.
     pub const Phase = enum(u8) { persist = 1, send = 2, apply = 3, notify = 4, snapshot = 5 };
@@ -88,9 +103,9 @@ pub const Effect = union(enum) {
     /// The phase in which a driver executes `effect`. Emission order is non-decreasing in it.
     pub fn phase(effect: *const Effect) Phase {
         const result: Phase = switch (effect.*) {
-            .truncate, .append, .save_hard_state => .persist,
-            .send => .send,
-            .apply => .apply,
+            .truncate, .append, .save_hard_state, .save_snapshot => .persist,
+            .send, .send_snapshot => .send,
+            .apply, .restore => .apply,
             .leader_changed => .notify,
             .snapshot_due => .snapshot,
         };
@@ -137,6 +152,7 @@ pub const InvariantError = log_module.Log.InvariantError || error{
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const interfaces = @import("../interfaces.zig");
 const log_module = @import("../log.zig");
 const types = @import("../types.zig");
 
@@ -144,6 +160,7 @@ const ConfError = types.ConfError;
 const Configuration = types.Configuration;
 const Entry = types.Entry;
 const HardState = types.HardState;
+const Header = types.Header;
 const Index = types.Index;
 const Message = types.Message;
 const MessageError = types.MessageError;
