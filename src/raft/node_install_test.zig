@@ -743,7 +743,12 @@ test "install cluster: a node cut off across compactions catches up by snapshot,
 
     const installs = c.installs[2];
     for (14..17) |number| try c.propose(@intCast(number));
-    try c.tick(0);
+    // A follower learns the last commit only from the next append or heartbeat round.
+    guard = 0;
+    while (c.applied[2] != c.applied[0]) : (guard += 1) {
+        try testing.expect(guard < 20);
+        try c.tick(0);
+    }
     try testing.expectEqual(installs, c.installs[2]); // The rest came as entries.
     try testing.expectEqual(@as(u32, 1), c.restores[2]);
     try testing.expectEqual(c.applied[0], c.applied[2]);
