@@ -31,8 +31,8 @@ All notable changes to this project are documented in this file. Format follows
   acks a snapshot at or below `commit` without installing, else emits `save_snapshot`,
   `restore` (apply phase, before any `apply`) and the reply. `Effect` gains `save_snapshot`,
   `send_snapshot` (the driver reads the stored record) and `restore`; `Driver.Fault` gains the
-  `LogStore.ReadError` and `StateMachine.RestoreError` sets; a follower trims an
-  `append_entries` that starts below its base.
+  `LogStore.ReadError` and `StateMachine.RestoreError` sets. On a term bump the follower saves
+  term, vote and the old commit before `save_snapshot`, so a crash between them restarts.
 
 ## [0.5.0] - 2026-10-27
 

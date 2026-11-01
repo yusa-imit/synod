@@ -141,8 +141,11 @@ pub fn step_install(
     if (bumped) _ = node.term_adopt(head.term);
     const claimed = follower_module.claim_leader(node, head.from);
     const installs = claimed and request.snapshot.index.order(node.commit_index) == .gt;
+    // Term and vote first, at the old commit: a crash before `save_snapshot` must not leave a
+    // snapshot whose term is ahead of the saved term (`RestoreInconsistent`). No-op when unchanged.
+    if (installs) node.emit_hard_state();
     if (installs) install(node, request);
-    node.emit_hard_state(); // After `save_snapshot`, ahead of the reply.
+    node.emit_hard_state(); // After `save_snapshot` (new commit), ahead of the reply.
     if (claimed) reply(node, head.from, request.snapshot.index);
     if (installs) node.emit(.{ .restore = request.snapshot.index });
     follower_module.notify_leader(node, leader_before, bumped);

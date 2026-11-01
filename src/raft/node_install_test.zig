@@ -456,6 +456,52 @@ test "install follower: a snapshot at a conflicting term resets the log and adop
     try testing.expectEqual(@as(u32, 0), rig.node.log.count);
 }
 
+test "install follower: a term bump persists term and old commit before the snapshot" {
+    var rig: Rig = undefined;
+    try holding(&rig);
+    defer rig.deinit(testing.allocator);
+    const commit_before = rig.node.status().commit_index;
+    const effects = try recv(&rig, install(2, 2, 9, 2, "state-at-9"));
+
+    // A crash between `save_hard_state` and `save_snapshot` must leave a restartable store: the
+    // snapshot's term is never ahead of the saved term, and the saved commit is within the log.
+    var hard_states: [2]types.HardState = undefined;
+    var hard_at: [2]usize = undefined;
+    var hard_count: usize = 0;
+    var snapshot_at: usize = effects.items.len;
+    for (effects.items, 0..) |effect, i| switch (effect) {
+        .save_hard_state => |hard| {
+            try testing.expect(hard_count < hard_states.len);
+            hard_states[hard_count] = hard;
+            hard_at[hard_count] = i;
+            hard_count += 1;
+        },
+        .save_snapshot => snapshot_at = i,
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 2), hard_count);
+    try testing.expect(hard_at[0] < snapshot_at);
+    try testing.expect(snapshot_at < hard_at[1]);
+    try testing.expectEqual(term(2), hard_states[0].term);
+    try testing.expectEqual(commit_before, hard_states[0].commit_index);
+    try testing.expectEqual(term(2), hard_states[1].term);
+    try testing.expectEqual(idx(9), hard_states[1].commit_index);
+}
+
+test "install follower: a second leader at the same term gets no install and no reply" {
+    var rig: Rig = undefined;
+    try holding(&rig); // Node 2 is the leader of term 1.
+    defer rig.deinit(testing.allocator);
+    const before = rig.node.status();
+    try testing.expectEqual(node_id(2), before.leader);
+    const effects = try recv(&rig, install(3, 1, 9, 1, "state-at-9"));
+
+    try expect_nothing_stored(effects);
+    try testing.expectEqual(@as(u32, 0), fixtures.count_effects(effects, .send));
+    try testing.expectEqual(@as(u32, 0), fixtures.count_effects(effects, .save_hard_state));
+    try testing.expectEqual(before, rig.node.status());
+}
+
 test "install follower: a stale term is refused at our term and nothing is installed" {
     var rig: Rig = undefined;
     try rig.init_fixed(testing.allocator, config_of(), &fixtures.base_restore, 0);

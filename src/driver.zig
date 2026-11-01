@@ -17,7 +17,10 @@
 //! allocated by `init`; one byte more is `SnapshotTooLarge`), `save_snapshot`, `sync`, then
 //! `step(.snapshot_saved)`, whose `Effects` are asserted empty. Any failure is a fail-stop
 //! `Fault` and the node is never told, so nothing compacts. `init` loads the store's snapshot,
-//! restores the state machine from it and replays only `(snapshot.index, commit]`.
+//! restores the state machine from it and replays only `(snapshot.index, commit]`. The install
+//! path (item 5) runs `save_snapshot` in the persist phase, `send_snapshot` by loading the stored
+//! record and sending it as `install_snapshot` (a missing or different record is `StoreCorrupt`),
+//! and `restore` in the apply phase from the record just saved and synced.
 //!
 //! Allocation: `init` allocates through the node, the snapshot buffer and a scratch slice freed
 //! before it returns; no method allocates afterwards, and the driver stores no allocator.
