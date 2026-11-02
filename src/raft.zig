@@ -21,6 +21,7 @@ pub const Input = node.Input;
 pub const Effect = node.Effect;
 pub const Effects = node.Effects;
 pub const SnapshotDue = node.SnapshotDue;
+pub const SnapshotSend = node.SnapshotSend;
 pub const Role = node.Role;
 pub const Status = node.Status;
 pub const Node = node.Node;
@@ -47,6 +48,8 @@ test {
     _ = @import("raft/node_commit_test.zig");
     // The compaction policy (plan 005 item 3) likewise.
     _ = @import("raft/node_snapshot_test.zig");
+    // InstallSnapshot: progress, leader send, follower install, catch-up (plan 005 item 5).
+    _ = @import("raft/node_install_test.zig");
     // Peer-reachable paths over a compacted log (review of plan 005 item 3) likewise.
     _ = @import("raft/node_base_test.zig");
 }

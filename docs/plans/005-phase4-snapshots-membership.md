@@ -42,7 +42,7 @@ Every code item is one PR with a failing test first; `zig build test`, `zig fmt 
       snapshot and replays only `(base, commit]`. *Failing test first:* restart over a store
       with a snapshot at 400 plus 20 entries matches a never-crashed replica's KV digest; a
       snapshot over its buffer is a typed `Fault`, fail-stop.
-- [ ] 5. **4A-ii InstallSnapshot.** A peer with `next <= base` enters progress `snapshot` and
+- [x] 5. **4A-ii InstallSnapshot.** A peer with `next <= base` enters progress `snapshot` and
       gets one whole `install_snapshot` (bounded by `snapshot_bytes_max`) per round timeout,
       then `probe`s from `match + 1`. A follower acks a snapshot at or below `commit` without
       installing; else truncate, install, restore, reply. *Failing test first:* a follower cut

@@ -124,7 +124,9 @@ A follower: term rules first; a configuration over `Config` caps is `Conf*` befo
 mutation; oversize data is `MessageTooLarge` (`validate`). `snapshot.index <= commit`: reply
 `match_index = snapshot.index`, change nothing. Else `save_snapshot` (the store keeps the
 suffix iff it holds `(index, term)`; the node mirrors it or `reset`s), the configuration copied,
-`save_hard_state(commit = index)`, the reply, `restore(index)`; so `Input.message` lives until
+`save_hard_state(commit = index)`, the reply, `restore(index)`. On a term bump a
+`save_hard_state` (new term, vote cleared, the old commit) precedes `save_snapshot`, so a crash
+between the two never leaves a snapshot ahead of the saved term (`RestoreInconsistent`); so `Input.message` lives until
 the step's effects ran (`Driver.receive` holds it). An `append_entries` with `prev_log_index <
 log.base.index` is trimmed to entries above the base (committed, so matching); if none remain
 it is accepted at its last index.

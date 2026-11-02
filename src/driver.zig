@@ -17,7 +17,10 @@
 //! allocated by `init`; one byte more is `SnapshotTooLarge`), `save_snapshot`, `sync`, then
 //! `step(.snapshot_saved)`, whose `Effects` are asserted empty. Any failure is a fail-stop
 //! `Fault` and the node is never told, so nothing compacts. `init` loads the store's snapshot,
-//! restores the state machine from it and replays only `(snapshot.index, commit]`.
+//! restores the state machine from it and replays only `(snapshot.index, commit]`. The install
+//! path (item 5) runs `save_snapshot` in the persist phase, `send_snapshot` by loading the stored
+//! record and sending it as `install_snapshot` (a missing or different record is `StoreCorrupt`),
+//! and `restore` in the apply phase from the record just saved and synced.
 //!
 //! Allocation: `init` allocates through the node, the snapshot buffer and a scratch slice freed
 //! before it returns; no method allocates afterwards, and the driver stores no allocator.
@@ -79,7 +82,8 @@ pub const Driver = struct {
         rng: Rng,
     };
     /// `LogStore.UpdateError` is a subset of `WriteError`.
-    pub const Fault = LogStore.WriteError || StateMachine.ApplyError || error{SnapshotTooLarge};
+    pub const Fault = LogStore.WriteError || LogStore.ReadError || StateMachine.ApplyError ||
+        StateMachine.RestoreError || error{SnapshotTooLarge};
     pub const InitError = raft.InitError || LogStore.ReadError || StateMachine.RestoreError;
 
     /// Restores the node from `deps.store` (hard state, snapshot if any, and the log above it),
@@ -251,6 +255,36 @@ pub const Driver = struct {
         assert(driver.node.status().snapshot_index == index);
     }
 
+    /// Runs a `send_snapshot`: loads the stored record, which must be exactly `send.snapshot`
+    /// (else `StoreCorrupt`), and sends an `install_snapshot` over it. The record is borrowed
+    /// from the store until its next mutating call, which `Transport.send` does not make.
+    fn snapshot_send(driver: *Driver, send: *const raft.SnapshotSend) Fault!void {
+        assert(!driver.stopped);
+        assert(send.snapshot.index != .zero);
+        const record = (try driver.deps.store.load_snapshot()) orelse return error.StoreCorrupt;
+        if (record.snapshot.index != send.snapshot.index) return error.StoreCorrupt;
+        if (record.snapshot.term != send.snapshot.term) return error.StoreCorrupt;
+
+        const message: Message = .{ .install_snapshot = .{
+            .header = send.header,
+            .snapshot = record.snapshot,
+            .configuration = record.configuration,
+        } };
+        driver.deps.transport.send(&message);
+    }
+
+    /// Runs a `restore`: the state machine from the stored snapshot, which the persist phase
+    /// just saved and synced and must be exactly at `index` (else `StoreCorrupt`).
+    fn snapshot_restore(driver: *Driver, index: types.Index) Fault!void {
+        assert(!driver.stopped);
+        assert(index != .zero);
+        const record = (try driver.deps.store.load_snapshot()) orelse return error.StoreCorrupt;
+        if (record.snapshot.index != index) return error.StoreCorrupt;
+
+        var reader = std.Io.Reader.fixed(record.snapshot.data);
+        try driver.deps.state_machine.restore(&reader);
+    }
+
     /// Runs one step's effects in order. The persist phase sets `unsynced`; the first later
     /// effect of a send or apply phase is preceded by exactly one `sync`.
     fn execute(driver: *Driver, effects: Effects) Fault!void {
@@ -277,6 +311,11 @@ pub const Driver = struct {
                     for (entries) |*entry| try driver.deps.state_machine.apply(entry);
                 },
                 .leader_changed => {},
+                .save_snapshot => |*record| {
+                    try store.save_snapshot(&record.snapshot, &record.configuration);
+                },
+                .send_snapshot => |*send| try driver.snapshot_send(send),
+                .restore => |index| try driver.snapshot_restore(index),
                 // The last effect of the step (ADR-009): `snapshot_saved` replaces the view.
                 .snapshot_due => |*due| try driver.snapshot_save(due),
             }
@@ -298,4 +337,5 @@ test {
     _ = @import("driver_test.zig");
     _ = @import("driver_init_bytes_test.zig");
     _ = @import("driver_snapshot_test.zig");
+    _ = @import("driver_install_test.zig");
 }

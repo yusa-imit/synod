@@ -63,6 +63,15 @@ test "node: Effect.phase maps every variant to its ADR-007 phase" {
             .snapshot = .{ .index = idx(1), .term = term(1) },
             .configuration = fixtures.configuration,
         } }, .phase = .snapshot },
+        .{ .effect = .{ .save_snapshot = .{
+            .snapshot = .{ .index = idx(1), .term = term(1), .data = "" },
+            .configuration = fixtures.configuration,
+        } }, .phase = .persist },
+        .{ .effect = .{ .send_snapshot = .{
+            .header = fixtures.header_of(1, 2, 1),
+            .snapshot = .{ .index = idx(1), .term = term(1) },
+        } }, .phase = .send },
+        .{ .effect = .{ .restore = idx(1) }, .phase = .apply },
     };
     try testing.expectEqual(@typeInfo(Effect).@"union".fields.len, cases.len);
     for (cases) |case| try testing.expectEqual(case.phase, case.effect.phase());
