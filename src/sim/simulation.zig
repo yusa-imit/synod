@@ -80,6 +80,7 @@ pub const Plant = enum(u8) {
     flip_data = 3,
     lose_synced_hard_state = 4,
     ack_uncommitted = 5,
+    restore_drops_key = 6,
 };
 
 /// Seeded fault draws (ADR-008 `Faults`, the crash subset of item 5; item 6 adds the partition
@@ -240,6 +241,9 @@ pub const Stats = struct {
     /// Seeded proposals a leader accepted (`ProposeNotLeader` and `ProposeLogFull` do not
     /// count).
     proposed: u64,
+    /// Snapshots a driver took and saved, and snapshots a follower installed.
+    snapshots: u64,
+    installs: u64,
     workload: Workload.Stats,
     network: Network.Stats,
     /// A hash of the network trace, the event count, the clock, every applied entry's
@@ -584,6 +588,8 @@ pub const Simulation = struct {
             .truncates = simulation.truncates_total(),
             .partitions = simulation.partitions,
             .proposed = simulation.proposed,
+            .snapshots = 0, // Stub (plan 005 item 6).
+            .installs = 0,
             .workload = simulation.workload.stats(),
             .network = simulation.network.stats(),
             .digest = simulation.digest(),
@@ -1059,13 +1065,14 @@ fn fault_of(plant: Plant) Network.Fault {
         .flip_data => .flip_data,
         .lose_synced_hard_state => .none,
         .ack_uncommitted => .none,
+        .restore_drops_key => .none,
     };
 }
 
 /// The store fault a `Plant` stands for; the other plants leave the store honest.
 fn store_fault_of(plant: Plant) CrashStore.Fault {
     return switch (plant) {
-        .none, .forge_votes, .flip_data, .ack_uncommitted => .none,
+        .none, .forge_votes, .flip_data, .ack_uncommitted, .restore_drops_key => .none,
         .lose_synced_hard_state => .lose_synced_hard_state,
     };
 }

@@ -123,7 +123,6 @@ pub const CrashStore = struct {
     /// Rebuilds `live` from `durable` plus the first `keep_count` unsynced ops.
     pub fn crash(crash_store: *CrashStore, keep_count: u32) void {
         assert(keep_count <= crash_store.ops_len);
-        assert(crash_store.durable.snapshot == null); // Snapshots are Phase 4.
         if (crash_store.fault == .lose_synced_hard_state) {
             crash_store.durable.hard_state = crash_store.hard_state_before;
         }
@@ -296,7 +295,6 @@ pub const CrashStore = struct {
 
     fn copy_store(target: *MemoryStore, source: *const MemoryStore) void {
         assert(target.entries.len == source.entries.len);
-        assert(source.snapshot == null);
         const used = source.data_used;
         @memcpy(target.data[0..used], source.data[0..used]);
         for (source.entries[0..source.count], 0..) |entry, position| {
@@ -309,7 +307,7 @@ pub const CrashStore = struct {
         target.base_index = source.base_index;
         target.base_term = source.base_term;
         target.hard_state = source.hard_state;
-        target.snapshot = null;
+        target.snapshot = source.snapshot; // Stub: borrows `source`'s bytes (plan 005 item 6).
     }
 
     // -----------------------------------------------------------------------------------

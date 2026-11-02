@@ -240,6 +240,19 @@ pub const Checker = struct {
         memory.applied = at;
     }
 
+    /// Node `node_index` holds state digest `digest` at applied index `applied`. Stub (plan 005
+    /// item 6): accepts everything until the ring of `(index, digest)` lands.
+    pub fn state_digest(
+        checker: *Checker,
+        node_index: u8,
+        applied_index: Index,
+        digest: u64,
+    ) Violation!void {
+        assert(node_index < checker.options.nodes_count);
+        _ = applied_index;
+        _ = digest;
+    }
+
     /// A restart forgets a node's commit, applied length and leader memory, never the chosen
     /// entries or the one-leader-per-term table.
     pub fn restarted(checker: *Checker, node_index: u8) void {

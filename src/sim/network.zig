@@ -36,6 +36,9 @@ comptime {
 }
 
 pub const Network = struct {
+    /// Node ids a snapshot's configuration can carry: voters, outgoing voters and learners.
+    pub const snapshot_ids_max: u32 = 3 * @as(u32, nodes_max);
+
     pub const Fault = enum(u8) { none = 1, forge_votes = 2, flip_data = 3 };
 
     pub const Model = struct {
@@ -189,7 +192,6 @@ pub const Network = struct {
         assert(head.from != .none);
         assert(head.to != .none);
         assert(head.from != head.to);
-        assert(std.meta.activeTag(message.*) != .install_snapshot);
         const from_index = network.index_of(head.from);
         const to_index = network.index_of(head.to);
         const seq = network.counters.sent;
@@ -489,7 +491,7 @@ pub const Network = struct {
             .append_entries_response,
             .install_snapshot_response,
             => {},
-            .install_snapshot => unreachable, // `send` asserts it is never queued.
+            .install_snapshot => {}, // Stub: bytes are not owned yet (plan 005 item 6).
         }
     }
 

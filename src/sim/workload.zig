@@ -118,9 +118,16 @@ pub const KvStateMachine = struct {
         corrupt: bool,
     };
 
-    pub const Options = struct { keys_count: u16, applied_max: u32 };
+    /// `restore_drops_key` plants a restore that forgets the last key (plan 005 item 6).
+    pub const Fault = enum(u8) { none = 1, restore_drops_key = 2 };
+
+    pub const Options = struct { keys_count: u16, applied_max: u32, fault: Fault = .none };
 
     pub const InvariantError = error{KvInvariant};
+
+    /// The snapshot stream: magic, version u8, keys u16, values u64 each, crc32.
+    pub const snapshot_magic = "SKV1".*;
+    pub const snapshot_version: u8 = 1;
 
     values: []u64,
     records: []Applied,
@@ -187,6 +194,22 @@ pub const KvStateMachine = struct {
             },
             .get => return kv.values[command.key],
         }
+    }
+
+    /// Bytes of the snapshot stream of a table of `keys_count` registers (`11 + 8 * keys`).
+    pub fn snapshot_bytes(keys_count: u16) u32 {
+        return 11 + 8 * @as(u32, keys_count);
+    }
+
+    /// A hash of the register file; equal tables have equal digests.
+    pub fn digest(kv: *const KvStateMachine) u64 {
+        return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(kv.values));
+    }
+
+    /// The register `key` holds (precondition: `key < keys_count`).
+    pub fn value(kv: *const KvStateMachine, key: u16) u64 {
+        assert(key < kv.values.len);
+        return kv.values[key];
     }
 
     /// Phase 3 takes no snapshots (ADR-008 amendment): a call is a harness fault.
