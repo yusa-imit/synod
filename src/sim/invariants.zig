@@ -11,9 +11,10 @@
 //!
 //! Fingerprints are in-process only: they are never persisted or compared across builds.
 //!
-//! Allocation: `Checker.init` only (`gpa`, six slices: `nodes_count * log_entries_max * 8`
+//! Allocation: `Checker.init` only (`gpa`, seven slices: `nodes_count * log_entries_max * 8`
 //! bytes of leader memory, `log_entries_max * 24` for chosen fingerprints, chosen terms and
-//! scratch, `terms_max + 1` leader table, and a `NodeMemory` slice of a few words per node);
+//! scratch, `log_entries_max * 24` for the state digest ring, `terms_max + 1` leader table,
+//! and a `NodeMemory` slice of a few words per node);
 //! `observe`, `applied`, `restarted` and `check` never allocate. The checker owns its slices
 //! and does not keep `gpa`; `deinit` takes it again. Observed logs are borrowed for the call.
 //! Caller contract (asserted): distinct node indexes `< nodes_count` per `observe`, and logs
@@ -128,6 +129,9 @@ const NodeMemory = struct {
     leading: bool = false,
 };
 
+/// One remembered `(index, digest)` of the state digest ring; `used` is false until first write.
+const DigestSlot = struct { index: u64, digest: u64, used: bool };
+
 /// The checker; see the module header for state, limits and the latching rule.
 pub const Checker = struct {
     pub const Options = struct { nodes_count: u8, log_entries_max: u32, terms_max: u32 };
@@ -141,6 +145,8 @@ pub const Checker = struct {
     chosen_terms: []u64, // The observer's term when index i + 1 was first seen committed.
     scratch: []u64, // The fingerprints of the log being observed.
     leader_of_term: []u8, // terms_max + 1 slots: leader node_index + 1, or 0 for none.
+    digests: []DigestSlot, // log_entries_max slots; index `i` lives in slot `i % len`.
+    digest_newest: u64, // The highest applied index any `state_digest` reported.
     chosen_max: u32,
     leader_terms: u32,
 
@@ -169,8 +175,12 @@ pub const Checker = struct {
         const leader_of_term = try gpa.alloc(u8, @as(usize, options.terms_max) + 1);
         errdefer gpa.free(leader_of_term);
 
+        const digests = try gpa.alloc(DigestSlot, log_max);
+        errdefer gpa.free(digests);
+
         @memset(nodes, .{});
         @memset(leader_of_term, 0);
+        @memset(digests, .{ .index = 0, .digest = 0, .used = false });
         checker.* = .{
             .options = options,
             .latched = @splat(null),
@@ -180,6 +190,8 @@ pub const Checker = struct {
             .chosen_terms = chosen_terms,
             .scratch = scratch,
             .leader_of_term = leader_of_term,
+            .digests = digests,
+            .digest_newest = 0,
             .chosen_max = 0,
             .leader_terms = 0,
         };
@@ -189,6 +201,8 @@ pub const Checker = struct {
     pub fn deinit(checker: *Checker, gpa: Allocator) void {
         assert(checker.nodes.len == checker.options.nodes_count);
         assert(checker.leader_of_term.len == @as(usize, checker.options.terms_max) + 1);
+        assert(checker.digests.len == checker.options.log_entries_max);
+        gpa.free(checker.digests);
         gpa.free(checker.leader_of_term);
         gpa.free(checker.scratch);
         gpa.free(checker.chosen_terms);
@@ -240,8 +254,11 @@ pub const Checker = struct {
         memory.applied = at;
     }
 
-    /// Node `node_index` holds state digest `digest` at applied index `applied`. Stub (plan 005
-    /// item 6): accepts everything until the ring of `(index, digest)` lands.
+    /// Node `node_index` holds state digest `digest` at applied index `applied_index` (a
+    /// snapshot install jumps the index, so reports need not be contiguous). The first digest
+    /// seen at an index is remembered in a ring of `log_entries_max` slots; any other digest at
+    /// that index, from any node, is `StateMachineSafety`. An index `log_entries_max` or more
+    /// behind the newest reported one is forgotten and not compared.
     pub fn state_digest(
         checker: *Checker,
         node_index: u8,
@@ -249,8 +266,21 @@ pub const Checker = struct {
         digest: u64,
     ) Violation!void {
         assert(node_index < checker.options.nodes_count);
-        _ = applied_index;
-        _ = digest;
+        assert(checker.digests.len == checker.options.log_entries_max);
+        const at: u64 = @intFromEnum(applied_index);
+        const ring_len: u64 = checker.digests.len;
+        if (at +| ring_len <= checker.digest_newest) return; // Older than the ring.
+
+        const slot = &checker.digests[@intCast(at % ring_len)];
+        if (slot.used and slot.index == at) {
+            if (slot.digest != digest) return checker.fail(.state_machine_safety);
+            return;
+        }
+        // The slot is empty or holds an index below the ring: `at` is in the window, so a
+        // slot index `at + k * ring_len` with k > 0 would have made `at` older than the ring.
+        assert(!slot.used or slot.index < at);
+        slot.* = .{ .index = at, .digest = digest, .used = true };
+        checker.digest_newest = @max(checker.digest_newest, at);
     }
 
     /// A restart forgets a node's commit, applied length and leader memory, never the chosen

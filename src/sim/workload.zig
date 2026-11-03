@@ -22,6 +22,9 @@
 //! operation stays outstanding for `HistoryChecker`'s one-operation-per-client rule. A put never
 //! writes 0 (the initial register) and `invoke < complete` strictly.
 //!
+//! Snapshot stream (little-endian): `"SKV1"`, version u8 (1), keys u16, `keys` values u64, crc32
+//! of every byte before it; `11 + 8 * keys` bytes.
+//!
 //! Allocation: `KvStateMachine.init` and `Workload.init` only; nothing allocates afterwards.
 
 const std = @import("std");
@@ -130,8 +133,11 @@ pub const KvStateMachine = struct {
     pub const snapshot_version: u8 = 1;
 
     values: []u64,
+    /// Where `restore` verifies a stream before any register is written.
+    staged: []u64,
     records: []Applied,
     len: u32,
+    fault: Fault,
 
     pub fn init(kv: *KvStateMachine, gpa: Allocator, options: Options) Allocator.Error!void {
         assert(options.keys_count > 0);
@@ -139,15 +145,27 @@ pub const KvStateMachine = struct {
         const values = try gpa.alloc(u64, options.keys_count);
         errdefer gpa.free(values);
 
+        const staged = try gpa.alloc(u64, options.keys_count);
+        errdefer gpa.free(staged);
+
         const records = try gpa.alloc(Applied, options.applied_max);
         @memset(values, 0);
-        kv.* = .{ .values = values, .records = records, .len = 0 };
+        @memset(staged, 0);
+        kv.* = .{
+            .values = values,
+            .staged = staged,
+            .records = records,
+            .len = 0,
+            .fault = options.fault,
+        };
     }
 
     pub fn deinit(kv: *KvStateMachine, gpa: Allocator) void {
         assert(kv.values.len > 0);
         assert(kv.records.len > 0);
+        assert(kv.staged.len > 0);
         gpa.free(kv.records);
+        gpa.free(kv.staged);
         gpa.free(kv.values);
         kv.* = undefined;
     }
@@ -212,24 +230,67 @@ pub const KvStateMachine = struct {
         return kv.values[key];
     }
 
-    /// Phase 3 takes no snapshots (ADR-008 amendment): a call is a harness fault.
+    /// Writes the snapshot stream (module doc); `WriteFailed` when `writer` is too small. The
+    /// registers and the undrained records are untouched.
     pub fn snapshot(
         kv: *KvStateMachine,
         writer: *Io.Writer,
     ) interfaces.StateMachine.SnapshotError!void {
         assert(kv.len <= kv.records.len);
-        assert(writer.end <= writer.buffer.len);
-        return error.StateMachineFailed;
+        assert(kv.values.len <= std.math.maxInt(u16));
+        var crc = std.hash.Crc32.init();
+        var head: [7]u8 = undefined;
+        @memcpy(head[0..4], &snapshot_magic);
+        head[4] = snapshot_version;
+        std.mem.writeInt(u16, head[5..7], @intCast(kv.values.len), .little);
+        try writer.writeAll(&head);
+        crc.update(&head);
+        for (kv.values) |register| {
+            var bytes: [8]u8 = undefined;
+            std.mem.writeInt(u64, &bytes, register, .little);
+            try writer.writeAll(&bytes);
+            crc.update(&bytes);
+        }
+        var tail: [4]u8 = undefined;
+        std.mem.writeInt(u32, &tail, crc.final(), .little);
+        try writer.writeAll(&tail);
     }
 
-    /// Phase 3 restores no snapshots (ADR-008 amendment): a call is a harness fault.
+    /// Loads the snapshot stream: the whole stream (magic, version, this machine's key count,
+    /// crc32) is verified in `staged` before any register changes, so a stream that fails
+    /// (`StateMachineSnapshotInvalid`, or the reader running dry) leaves the table as it was.
+    /// Consumes exactly the stream. Undrained records are kept: they are applied entries.
     pub fn restore(
         kv: *KvStateMachine,
         reader: *Io.Reader,
     ) interfaces.StateMachine.RestoreError!void {
         assert(kv.len <= kv.records.len);
-        assert(reader.seek <= reader.end);
-        return error.StateMachineFailed;
+        assert(kv.staged.len == kv.values.len);
+        var head: [7]u8 = undefined;
+        try reader.readSliceAll(&head);
+        if (!std.mem.eql(u8, head[0..4], &snapshot_magic)) return error.StateMachineSnapshotInvalid;
+
+        if (head[4] != snapshot_version) return error.StateMachineSnapshotInvalid;
+
+        const keys_count = std.mem.readInt(u16, head[5..7], .little);
+        if (keys_count != kv.values.len) return error.StateMachineSnapshotInvalid;
+
+        var crc = std.hash.Crc32.init();
+        crc.update(&head);
+        for (kv.staged) |*register| {
+            var bytes: [8]u8 = undefined;
+            try reader.readSliceAll(&bytes);
+            crc.update(&bytes);
+            register.* = std.mem.readInt(u64, &bytes, .little);
+        }
+        var tail: [4]u8 = undefined;
+        try reader.readSliceAll(&tail);
+        if (std.mem.readInt(u32, &tail, .little) != crc.final()) {
+            return error.StateMachineSnapshotInvalid;
+        }
+        @memcpy(kv.values, kv.staged);
+        // The planted fault: the last register is not restored.
+        if (kv.fault == .restore_drops_key) kv.values[kv.values.len - 1] = 0;
     }
 
     /// The records applied since the last `drain`, in apply order; empties the buffer. Borrowed
