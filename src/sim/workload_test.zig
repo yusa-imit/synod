@@ -392,7 +392,7 @@ test "kv: reset frees a full buffer" {
     try testing.expectEqual(@as(usize, 1), rig.kv.drain().len);
 }
 
-test "kv: through the StateMachine interface apply works and snapshot, restore fail" {
+test "kv: through the StateMachine interface apply, snapshot and restore all work" {
     var rig: fx.KvRig = undefined;
     try rig.init(gpa, 4, 4);
     defer rig.deinit(gpa);
@@ -406,13 +406,27 @@ test "kv: through the StateMachine interface apply works and snapshot, restore f
     try testing.expectEqual(@as(usize, 1), records.len);
     try testing.expectEqual(@as(u64, 31), records[0].result);
 
-    var buffer: [16]u8 = undefined;
+    // The snapshot is a whole stream of the documented size.
+    var buffer: [KvStateMachine.snapshot_bytes(4)]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try testing.expectError(error.StateMachineFailed, machine.snapshot(&writer));
-    var reader = std.Io.Reader.fixed(&buffer);
-    try testing.expectError(error.StateMachineFailed, machine.restore(&reader));
-    // The refused snapshot and restore changed no state.
-    const read = try rig.apply_command(3, fx.get(1, 2, 2));
+    try machine.snapshot(&writer);
+    try testing.expectEqual(buffer.len, writer.buffered().len);
+    const digest_taken = rig.kv.digest();
+
+    // Overwrite the register, then restore: the old value is back.
+    const overwrite = try rig.apply_command(3, fx.put(1, 2, 77, 2));
+    try testing.expectEqual(@as(u64, 77), overwrite.result);
+    var reader = std.Io.Reader.fixed(writer.buffered());
+    try machine.restore(&reader);
+    try testing.expectEqual(digest_taken, rig.kv.digest());
+    try testing.expectEqual(@as(u64, 31), rig.kv.value(2));
+
+    // A corrupted stream is refused and changes nothing.
+    buffer[7] ^= 0xff;
+    var bad_reader = std.Io.Reader.fixed(&buffer);
+    try testing.expectError(error.StateMachineSnapshotInvalid, machine.restore(&bad_reader));
+    try testing.expectEqual(digest_taken, rig.kv.digest());
+    const read = try rig.apply_command(4, fx.get(1, 2, 3));
     try testing.expectEqual(@as(u64, 31), read.result);
 }
 

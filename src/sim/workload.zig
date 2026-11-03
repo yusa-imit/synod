@@ -138,6 +138,9 @@ pub const KvStateMachine = struct {
     records: []Applied,
     len: u32,
     fault: Fault,
+    /// Streams `restore` accepted over the machine's life; `reset` keeps it (a restart does not
+    /// forget that it restored), so the simulator can tell an install from a plain apply.
+    restores: u64,
 
     pub fn init(kv: *KvStateMachine, gpa: Allocator, options: Options) Allocator.Error!void {
         assert(options.keys_count > 0);
@@ -157,6 +160,7 @@ pub const KvStateMachine = struct {
             .records = records,
             .len = 0,
             .fault = options.fault,
+            .restores = 0,
         };
     }
 
@@ -291,6 +295,7 @@ pub const KvStateMachine = struct {
         @memcpy(kv.values, kv.staged);
         // The planted fault: the last register is not restored.
         if (kv.fault == .restore_drops_key) kv.values[kv.values.len - 1] = 0;
+        kv.restores += 1;
     }
 
     /// The records applied since the last `drain`, in apply order; empties the buffer. Borrowed

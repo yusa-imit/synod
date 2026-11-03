@@ -232,10 +232,12 @@ test "network snapshot: duplicate_percent 100 delivers the snapshot twice, both 
         try testing.expect(rounds < 100);
         if (due > rig.clock.time_ms) rig.clock.advance_to(due);
         while (rig.network.pop_due()) |got| {
+            // Every delivery is either an intact copy of the snapshot or the noise message.
+            const noise_message = noise.build();
+            if (snapshot_eql(&noise_message, got)) continue;
             try testing.expect(snapshot_eql(&sent, got));
             delivered += 1;
-            rig.network.send(&noise.build()); // reuse of freed slots must not corrupt the rest
-            _ = rig.network.pop_due();
+            rig.network.send(&noise_message); // reuse of freed slots must not corrupt the rest
         }
     }
     try testing.expect(delivered >= 2);

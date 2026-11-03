@@ -15,8 +15,9 @@
 //! bytes of leader memory, `log_entries_max * 24` for chosen fingerprints, chosen terms and
 //! scratch, `log_entries_max * 24` for the state digest ring, `terms_max + 1` leader table,
 //! and a `NodeMemory` slice of a few words per node);
-//! `observe`, `applied`, `restarted` and `check` never allocate. The checker owns its slices
-//! and does not keep `gpa`; `deinit` takes it again. Observed logs are borrowed for the call.
+//! `observe`, `applied`, `installed`, `restarted` and `check` never allocate. The checker owns
+//! its slices and does not keep `gpa`; `deinit` takes it again. Observed logs are borrowed for
+//! the call.
 //! Caller contract (asserted): distinct node indexes `< nodes_count` per `observe`, and logs
 //! of at most `log_entries_max` entries. What a node reports (a commit index beyond its log,
 //! non-contiguous entry indexes) is data, returned as `StateMachineSafety`.
@@ -252,6 +253,29 @@ pub const Checker = struct {
         const chosen = checker.chosen_prints[@intCast(at - 1)];
         if (chosen != entry_fingerprint) return checker.fail(.state_machine_safety);
         memory.applied = at;
+    }
+
+    /// Node `node_index` installed a snapshot: its applied index jumps to `applied_index`
+    /// without per-entry `applied` reports (the next `applied` must be `applied_index + 1`).
+    /// An install never goes back (`applied_index` must exceed the node's applied index) and a
+    /// snapshot covers only chosen entries (`applied_index <= chosen_max`); either breach is
+    /// `StateMachineSafety`. An installed snapshot is committed, so the node's commit rises to
+    /// at least `applied_index`.
+    pub fn installed(
+        checker: *Checker,
+        node_index: u8,
+        applied_index: Index,
+    ) Violation!void {
+        assert(node_index < checker.options.nodes_count);
+        assert(checker.chosen_max <= checker.options.log_entries_max);
+        const memory = &checker.nodes[node_index];
+        const at: u64 = @intFromEnum(applied_index);
+        if (at <= memory.applied) return checker.fail(.state_machine_safety);
+        if (at > checker.chosen_max) return checker.fail(.state_machine_safety);
+        memory.applied = at;
+        memory.commit = @max(memory.commit, at);
+        assert(memory.applied <= memory.commit); // Applied never passes commit.
+        assert(memory.commit <= checker.chosen_max); // A commit is chosen when observed.
     }
 
     /// Node `node_index` holds state digest `digest` at applied index `applied_index` (a
