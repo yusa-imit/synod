@@ -30,7 +30,12 @@ const Property = invariants.Property;
 const gpa = testing.allocator;
 const Prng = @import("prng.zig").Prng;
 const ring: u32 = 4;
-const options: Checker.Options = .{ .nodes_count = 3, .log_entries_max = ring, .terms_max = 8 };
+const options: Checker.Options = .{
+    .nodes_count = 3,
+    .log_entries_max = ring,
+    .chosen_entries_max = ring,
+    .terms_max = 8,
+};
 
 fn idx(value: u64) Index {
     return @enumFromInt(value);

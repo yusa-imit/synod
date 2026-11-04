@@ -33,6 +33,13 @@ All notable changes to this project are documented in this file. Format follows
   `send_snapshot` (the driver reads the stored record) and `restore`; `Driver.Fault` gains the
   `LogStore.ReadError` and `StateMachine.RestoreError` sets. On a term bump the follower saves
   term, vote and the old commit before `save_snapshot`, so a crash between them restarts.
+- Simulator snapshots (plan 005 item 6): the KV `"SKV1"` snapshot/restore replaces the
+  `StateMachineFailed` stubs; `CrashStore` journals `save_snapshot` (unsynced lost, torn caught
+  by crc32); `Network` slots carry snapshot bytes; the checker compares state digests at equal
+  applied indexes, accepts `installed(node, index)` jumps and windowed (compacted) logs
+  (`Checker.Options.chosen_entries_max`); `Plant.restore_drops_key`; `Stats.snapshots` and
+  `Stats.installs`. The simulator now runs with compaction on, and the workload test is back to
+  `log_entries_max = 64`.
 
 ## [0.5.0] - 2026-10-27
 

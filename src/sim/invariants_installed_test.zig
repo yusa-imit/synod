@@ -23,7 +23,12 @@ const Observation = invariants.Observation;
 const Property = invariants.Property;
 
 const gpa = testing.allocator;
-const options: Checker.Options = .{ .nodes_count = 3, .log_entries_max = 8, .terms_max = 16 };
+const options: Checker.Options = .{
+    .nodes_count = 3,
+    .log_entries_max = 8,
+    .chosen_entries_max = 8,
+    .terms_max = 16,
+};
 const log_abc = [_]Entry{ fx.entry(1, 1, "a"), fx.entry(2, 1, "b"), fx.entry(3, 2, "c") };
 
 fn obs(node: u8, commit: u64, log: []const Entry) Observation {

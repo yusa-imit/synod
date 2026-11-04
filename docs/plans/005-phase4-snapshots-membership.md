@@ -48,7 +48,7 @@ Every code item is one PR with a failing test first; `zig build test`, `zig fmt 
       installing; else truncate, install, restore, reply. *Failing test first:* a follower cut
       off across two compactions catches up only by snapshot; stale and duplicate snapshots
       change nothing; an oversize one is `MessageTooLarge`, never an assert.
-- [ ] 6. **Sim snapshots.** The KV `"SKV1"` stream (ADR-008) replaces the `StateMachineFailed`
+- [x] 6. **Sim snapshots.** The KV `"SKV1"` stream (ADR-008) replaces the `StateMachineFailed`
       stubs; `CrashStore.crash` covers `save_snapshot` (unsynced lost, torn caught by crc32);
       `Network` slots carry snapshot bytes; the checker adds equal state digests at equal
       applied index; the workload test returns to `log_entries_max = 64`. *Failing test

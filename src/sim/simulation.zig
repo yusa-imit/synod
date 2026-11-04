@@ -147,6 +147,9 @@ pub const Options = struct {
     events_max: u64,
     /// Terms the checker tracks before `TermsExhausted`.
     terms_max: u32,
+    /// The highest log index the checker can remember as chosen (>= `raft.log_entries_max`)
+    /// before `ChosenExhausted`; a compacting node commits far past its own log window.
+    chosen_entries_max: u32,
     plant: Plant,
 
     /// A healthy, lossless, fault-free cluster of `nodes_count` nodes: delays 1..10 ms,
@@ -201,6 +204,7 @@ pub const Options = struct {
             .search_steps_max = 10_000_000,
             .events_max = 200_000,
             .terms_max = 256,
+            .chosen_entries_max = 4096,
             .plant = .none,
         };
     }
@@ -257,7 +261,13 @@ pub const Stats = struct {
 
 /// Limits of the harness itself; not safety violations. `HistoryTooLong` and `CheckInconclusive`
 /// come from `check(.linearizability)`.
-pub const LimitError = error{ EventsExhausted, TermsExhausted, HistoryTooLong, CheckInconclusive };
+pub const LimitError = error{
+    EventsExhausted,
+    TermsExhausted,
+    ChosenExhausted,
+    HistoryTooLong,
+    CheckInconclusive,
+};
 
 /// Everything a node, its store or its state machine can report through a `Driver`.
 pub const NodeError = raft.InvariantError || raft.InitError || raft.ReceiveError ||
@@ -372,6 +382,7 @@ pub const Simulation = struct {
         try simulation.checker.init(gpa, .{
             .nodes_count = options.nodes_count,
             .log_entries_max = options.raft.log_entries_max,
+            .chosen_entries_max = options.chosen_entries_max,
             .terms_max = options.terms_max,
         });
         errdefer simulation.checker.deinit(gpa);

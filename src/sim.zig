@@ -79,5 +79,7 @@ test {
     _ = @import("sim/network_snapshot_test.zig");
     _ = @import("sim/invariants_digest_test.zig");
     _ = @import("sim/invariants_installed_test.zig");
+    _ = @import("sim/invariants_window_test.zig");
+    _ = @import("sim/temp_seed_test.zig");
     _ = @import("sim/simulation_snapshot_test.zig");
 }

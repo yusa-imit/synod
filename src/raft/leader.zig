@@ -201,7 +201,9 @@ pub fn step_snapshot_response(node: *Node, reply: *const SnapshotResponse) void 
     node.rounds.records[records_base(node, slot)] = Round.empty; // The install's record.
     commit_module.advance_leader(node); // A new match may complete a quorum.
     if (p.next.order(node.log.last_index()) != .gt) send_slot(node, slot, peer);
-    assert(p.state != .snapshot);
+    // The ack resumed the peer at `match + 1`. It is back in `.snapshot` only when the log was
+    // compacted past that point meanwhile: then a newer snapshot (above `match`) is in flight.
+    if (p.state == .snapshot) assert(@intFromEnum(p.next) > @intFromEnum(p.match) + 1);
     assert(node.effects_len <= 2); // At most `save_hard_state` and one send.
 }
 
