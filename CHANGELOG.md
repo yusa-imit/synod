@@ -59,6 +59,11 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Fixed
 
+- Review of the simulator snapshot PR (#85): the leader's relaxed `state != .snapshot`
+  assertion in `step_snapshot_response` is now covered by a cluster test (the ack of a snapshot
+  the leader compacted past gets a newer snapshot at once); `Driver.init` restores the state
+  machine last, after the store and the node accepted the snapshot, so a refused boot leaves it
+  untouched (covered by "a refused boot never restores the state machine").
 - KV workload review findings (plan 004 item 10): a put of 0, a command with a key outside the
   table and any other entry that claims to be a command but fails to decode are recorded as
   corrupt (`Applied.corrupt`) and fail the run with `KvInvariant` / `WorkloadInvariant` and its
