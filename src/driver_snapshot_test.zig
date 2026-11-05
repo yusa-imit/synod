@@ -1033,6 +1033,24 @@ test "driver snapshot: a tail one entry longer than the node log is RestoreLogFu
     try expect_boot_error(&rig, error.RestoreLogFull);
 }
 
+// A refused boot must not have touched the state machine: restore only after the store and the
+// node accepted the restart (review of plan 005 item 4).
+test "driver snapshot: a refused boot never restores the state machine" {
+    var inconsistent: Rig = undefined;
+    try inconsistent.create(testing.allocator, spec_restart, &fx.configuration);
+    defer inconsistent.destroy(testing.allocator);
+    _ = try preload(&inconsistent, 0, 1);
+    inconsistent.store.hard_state.term = fx.term(restart_snapshot_term - 1);
+    try expect_boot_error(&inconsistent, error.RestoreInconsistent);
+    try testing.expectEqual(@as(u32, 0), inconsistent.sm.restore_calls);
+
+    var too_long: Rig = undefined;
+    try tail_rig(&too_long, restart_tail - 1);
+    defer too_long.destroy(testing.allocator);
+    try expect_boot_error(&too_long, error.RestoreLogFull);
+    try testing.expectEqual(@as(u32, 0), too_long.sm.restore_calls);
+}
+
 // ---- 6. bytes bound ---------------------------------------------------------------------------
 
 test "driver snapshot: init_bytes_max grows by exactly the snapshot buffer" {

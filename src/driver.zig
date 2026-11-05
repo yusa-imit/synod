@@ -107,8 +107,6 @@ pub const Driver = struct {
         var base = log.Base.zero;
         var restore_configuration = configuration.*;
         if (record) |found| {
-            var reader = std.Io.Reader.fixed(found.snapshot.data);
-            try deps.state_machine.restore(&reader);
             base = .{ .index = found.snapshot.index, .term = found.snapshot.term };
             restore_configuration = found.configuration;
         }
@@ -134,6 +132,14 @@ pub const Driver = struct {
 
         const buffer_len: usize = @intCast(config.message_limits.snapshot_bytes_max);
         driver.snapshot_buffer = try gpa.alloc(u8, buffer_len);
+        errdefer gpa.free(driver.snapshot_buffer);
+
+        // Last, so a refused restart never touches the state machine: the store and the node
+        // have accepted the snapshot before the machine is told to load it.
+        if (record) |found| {
+            var reader = std.Io.Reader.fixed(found.snapshot.data);
+            try deps.state_machine.restore(&reader);
+        }
         driver.stopped = false;
         driver.deps = deps;
         driver.options = options;

@@ -29,6 +29,7 @@ const terms_cap = 64;
 const options: Checker.Options = .{
     .nodes_count = nodes_count,
     .log_entries_max = log_cap,
+    .chosen_entries_max = log_cap,
     .terms_max = terms_cap,
 };
 

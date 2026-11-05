@@ -817,7 +817,8 @@ test "network: bytes_required equals the bytes requested for every size" {
 
 // ADR-008's formula omitted the per-slot bookkeeping (due time, sequence, link, flags); the
 // amended ADR adds `Network.slot_meta_bytes` per in-flight slot, so each extra slot costs that
-// more than the message storage alone.
+// more than the message storage alone. A slot also owns its snapshot payload
+// (`snapshot_bytes_max`) and `snapshot_ids_max` node ids, so a duplicate never shares bytes.
 test "network: bytes_required grows by one message slot per extra messages_max" {
     var small = fx.options_of(3, fx.base_model, .none);
     var large = small;
@@ -825,8 +826,10 @@ test "network: bytes_required grows by one message slot per extra messages_max" 
     large.model.messages_max = 12;
     const slot = @sizeOf(Message) +
         fx.entries_max * (@sizeOf(types.Entry) + fx.entry_bytes_max);
+    const snapshot_slot = small.message_limits.snapshot_bytes_max +
+        @sizeOf(types.NodeId) * Network.snapshot_ids_max;
     const grown = Network.bytes_required(&large) - Network.bytes_required(&small);
-    try testing.expectEqual(8 * (slot + Network.slot_meta_bytes), grown);
+    try testing.expectEqual(8 * (slot + snapshot_slot + Network.slot_meta_bytes), grown);
     var wide = small;
     wide.message_limits.entry_bytes_max = fx.entry_bytes_max + 3;
     try testing.expectEqual(

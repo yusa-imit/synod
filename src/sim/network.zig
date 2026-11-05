@@ -4,14 +4,18 @@
 //!
 //! Layout: `messages_max` in-flight slots plus one delivery slot, each owning a `Message`, its
 //! `Entry` array and the entry bytes, so a delivered message stays valid while the receiver
-//! sends more (`pop_due` borrows the delivery slot until the next `pop_due`).
+//! sends more (`pop_due` borrows the delivery slot until the next `pop_due`). A slot also owns a
+//! whole `install_snapshot`: `snapshot_bytes_max` payload bytes and `snapshot_ids_max` node ids
+//! (ADR-009), so a duplicate or reorder never shares bytes. A delivered snapshot is not copied
+//! again: the delivery borrows the bytes of the slot it came from, and that slot's snapshot
+//! storage is not reused by a later snapshot `send` until the next `pop_due` (`snapshot_held`).
 //!
 //! Cost: `send`, `pop_due`, `next_due_ms` and `check_invariants` scan the slot table, so each
 //! is O(messages_max) (256 in the sweep preset); the table is small and the scan keeps the
 //! (at_ms, seq) order trivially correct. Time: the clock must stay at or below
 //! `maxInt(u64) - delay_ms_max` whenever a due time is computed (asserted).
 //!
-//! Allocation: `init` only (four slices, sized by `bytes_required`). Determinism: every draw
+//! Allocation: `init` only (six slices, sized by `bytes_required`). Determinism: every draw
 //! comes from the `Prng` handed to `init`: one `chance(loss)` and one delay per send, one
 //! `chance(duplicate)` per delivery of an original (and one delay when it re-arms).
 
@@ -36,6 +40,9 @@ comptime {
 }
 
 pub const Network = struct {
+    /// Node ids a snapshot's configuration can carry: voters, outgoing voters and learners.
+    pub const snapshot_ids_max: u32 = 3 * @as(u32, nodes_max);
+
     pub const Fault = enum(u8) { none = 1, forge_votes = 2, flip_data = 3 };
 
     pub const Model = struct {
@@ -98,10 +105,16 @@ pub const Network = struct {
     messages: []Message,
     entries: []Entry,
     bytes: []u8,
+    /// `slots * snapshot_bytes_max` payload bytes of `install_snapshot` messages.
+    snapshot_bytes: []u8,
+    /// `slots * snapshot_ids_max` node ids of their configurations.
+    snapshot_ids: []NodeId,
     metas: []Meta,
     cut_matrix: [nodes_max][nodes_max]bool,
     trace: u64,
     delivered_last: bool,
+    /// The slot whose snapshot storage the last delivery borrows; null when none.
+    snapshot_held: ?usize,
 
     pub fn init(
         network: *Network,
@@ -124,6 +137,8 @@ pub const Network = struct {
         const slots = @as(usize, options.model.messages_max) + 1;
         const entries_count = slots * options.message_limits.entries_max;
         const bytes_count = entries_count * options.message_limits.entry_bytes_max;
+        const snapshot_bytes_count = slots * options.message_limits.snapshot_bytes_max;
+        const snapshot_ids_count = slots * snapshot_ids_max;
         const messages = try gpa.alloc(Message, slots);
         errdefer gpa.free(messages);
 
@@ -132,6 +147,12 @@ pub const Network = struct {
 
         const bytes = try gpa.alloc(u8, bytes_count);
         errdefer gpa.free(bytes);
+
+        const snapshot_bytes = try gpa.alloc(u8, snapshot_bytes_count);
+        errdefer gpa.free(snapshot_bytes);
+
+        const snapshot_ids = try gpa.alloc(NodeId, snapshot_ids_count);
+        errdefer gpa.free(snapshot_ids);
 
         const metas = try gpa.alloc(Meta, options.model.messages_max);
         errdefer gpa.free(metas);
@@ -146,10 +167,13 @@ pub const Network = struct {
             .messages = messages,
             .entries = entries,
             .bytes = bytes,
+            .snapshot_bytes = snapshot_bytes,
+            .snapshot_ids = snapshot_ids,
             .metas = metas,
             .cut_matrix = @splat(@splat(false)),
             .trace = 0,
             .delivered_last = false,
+            .snapshot_held = null,
         };
         assert(network.used == 0);
     }
@@ -159,6 +183,8 @@ pub const Network = struct {
         assert(network.messages.len == network.metas.len + 1);
         assert(network.metas.len == network.options.model.messages_max);
         gpa.free(network.metas);
+        gpa.free(network.snapshot_ids);
+        gpa.free(network.snapshot_bytes);
         gpa.free(network.bytes);
         gpa.free(network.entries);
         gpa.free(network.messages);
@@ -171,7 +197,10 @@ pub const Network = struct {
         const entries_max: u64 = options.message_limits.entries_max;
         const entry_bytes_max: u64 = options.message_limits.entry_bytes_max;
         const per_slot = @sizeOf(Message) + entries_max * (@sizeOf(Entry) + entry_bytes_max);
-        const total = slots * per_slot + options.model.messages_max * slot_meta_bytes;
+        const snapshot_bytes_max: u64 = options.message_limits.snapshot_bytes_max;
+        const snapshot_per_slot = snapshot_bytes_max + @sizeOf(NodeId) * snapshot_ids_max;
+        const total = slots * (per_slot + snapshot_per_slot) +
+            options.model.messages_max * slot_meta_bytes;
         assert(total >= slots * @sizeOf(Message));
         assert(total > 0);
         return total;
@@ -181,7 +210,8 @@ pub const Network = struct {
     /// a seeded delay, unless the draw says lost or the table is full. Never blocks, never
     /// grows. Preconditions (the `Transport.send` contract, asserted): protocol version
     /// non-zero, `from` and `to` not `.none`, in `1..nodes_count` and different; entries within
-    /// the configured limits; not an `install_snapshot` (Phase 4); the clock within
+    /// the configured limits (an `install_snapshot` within `snapshot_bytes_max` bytes and
+    /// `nodes_max` ids per node list); the clock within
     /// `maxInt(u64) - delay_ms_max`.
     pub fn send(network: *Network, message: *const Message) void {
         const head = message.header();
@@ -189,7 +219,6 @@ pub const Network = struct {
         assert(head.from != .none);
         assert(head.to != .none);
         assert(head.from != head.to);
-        assert(std.meta.activeTag(message.*) != .install_snapshot);
         const from_index = network.index_of(head.from);
         const to_index = network.index_of(head.to);
         const seq = network.counters.sent;
@@ -200,7 +229,8 @@ pub const Network = struct {
             network.counters.dropped_loss += 1;
             return;
         }
-        const slot = network.find_free() orelse {
+        const skip = if (message.* == .install_snapshot) network.snapshot_held else null;
+        const slot = network.find_free(skip) orelse {
             network.counters.dropped_full += 1;
             return;
         };
@@ -290,6 +320,7 @@ pub const Network = struct {
     /// due. The result is borrowed until the next `pop_due`.
     pub fn pop_due(network: *Network) ?*const Message {
         network.delivered_last = false;
+        network.snapshot_held = null; // The previous delivery's borrow ends here.
         const now_ms = network.virtual_clock.now_ms();
         // Each pass consumes one slot or returns, so `messages_max + 1` passes always return.
         for (0..network.metas.len + 1) |_| {
@@ -388,12 +419,19 @@ pub const Network = struct {
         return delay_ms;
     }
 
-    fn find_free(network: *const Network) ?usize {
+    /// The first free slot other than `skip` (the borrowed snapshot storage); null when none.
+    fn find_free(network: *const Network, skip: ?usize) ?usize {
         assert(network.used <= network.options.model.messages_max);
+        var skipped: u32 = 0;
         for (network.metas, 0..) |meta, slot| {
-            if (!meta.used) return slot;
+            if (meta.used) continue;
+            if (slot == skip) {
+                skipped += 1;
+                continue;
+            }
+            return slot;
         }
-        assert(network.used == network.options.model.messages_max);
+        assert(network.used + skipped == network.options.model.messages_max);
         return null;
     }
 
@@ -429,7 +467,12 @@ pub const Network = struct {
         const meta = network.metas[slot];
         assert(meta.used);
         const delivery_slot = network.metas.len;
-        network.copy_message(delivery_slot, &network.messages[slot]);
+        if (network.messages[slot] == .install_snapshot) {
+            network.messages[delivery_slot] = network.messages[slot]; // Borrows slot's bytes.
+            network.snapshot_held = slot;
+        } else {
+            network.copy_message(delivery_slot, &network.messages[slot]);
+        }
         network.apply_fault(delivery_slot);
         network.counters.delivered += 1;
         network.delivered_last = true;
@@ -489,8 +532,37 @@ pub const Network = struct {
             .append_entries_response,
             .install_snapshot_response,
             => {},
-            .install_snapshot => unreachable, // `send` asserts it is never queued.
+            .install_snapshot => |request| network.copy_snapshot(slot, &request),
         }
+    }
+
+    /// Copies a snapshot's bytes and its three node lists into storage slot `slot` and points
+    /// the message stored there at the copies.
+    fn copy_snapshot(network: *Network, slot: usize, request: *const types.SnapshotRequest) void {
+        const bytes_max = network.options.message_limits.snapshot_bytes_max;
+        assert(slot <= network.metas.len);
+        assert(request.snapshot.data.len <= bytes_max);
+        const data_base = slot * @as(usize, @intCast(bytes_max));
+        const data = network.snapshot_bytes[data_base..][0..request.snapshot.data.len];
+        @memcpy(data, request.snapshot.data);
+        const lists = [_][]const NodeId{
+            request.configuration.voters,
+            request.configuration.voters_outgoing,
+            request.configuration.learners,
+        };
+        var views: [3][]const NodeId = undefined;
+        var used: usize = slot * snapshot_ids_max;
+        for (lists, 0..) |list, which| {
+            assert(list.len <= nodes_max);
+            @memcpy(network.snapshot_ids[used..][0..list.len], list);
+            views[which] = network.snapshot_ids[used..][0..list.len];
+            used += list.len;
+        }
+        const copied = &network.messages[slot].install_snapshot;
+        copied.snapshot.data = data;
+        copied.configuration.voters = views[0];
+        copied.configuration.voters_outgoing = views[1];
+        copied.configuration.learners = views[2];
     }
 
     /// The planted fault (ADR-008) on the delivery copy; the queued original is untouched.

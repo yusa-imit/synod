@@ -73,4 +73,12 @@ test {
     // The review findings of item 10: workload validation, invariants, corrupt entries.
     _ = @import("sim/workload_hooks_test.zig");
     _ = @import("sim/workload_review_test.zig");
+    // Plan 005 item 6: sim snapshots (KV stream, crash store, network, digest, compaction).
+    _ = @import("sim/workload_snapshot_test.zig");
+    _ = @import("sim/crash_store_snapshot_test.zig");
+    _ = @import("sim/network_snapshot_test.zig");
+    _ = @import("sim/invariants_digest_test.zig");
+    _ = @import("sim/invariants_installed_test.zig");
+    _ = @import("sim/invariants_window_test.zig");
+    _ = @import("sim/simulation_snapshot_test.zig");
 }

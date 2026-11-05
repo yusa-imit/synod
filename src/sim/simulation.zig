@@ -41,6 +41,7 @@ const network_module = @import("network.zig");
 const prng_module = @import("prng.zig");
 const linearizability_module = @import("linearizability.zig");
 const sim_node_module = @import("sim_node.zig");
+const sim_snapshots = @import("sim_snapshots.zig");
 const workload_hooks = @import("workload_hooks.zig");
 const workload_module = @import("workload.zig");
 
@@ -73,13 +74,15 @@ comptime {
 }
 
 /// A fault the harness plants to prove the checkers bite. Item 5 adds
-/// `lose_synced_hard_state`, item 10 `ack_uncommitted` (additive variants).
+/// `lose_synced_hard_state`, item 10 `ack_uncommitted`, plan 005 item 6 `restore_drops_key`
+/// (additive variants).
 pub const Plant = enum(u8) {
     none = 1,
     forge_votes = 2,
     flip_data = 3,
     lose_synced_hard_state = 4,
     ack_uncommitted = 5,
+    restore_drops_key = 6,
 };
 
 /// Seeded fault draws (ADR-008 `Faults`, the crash subset of item 5; item 6 adds the partition
@@ -144,6 +147,9 @@ pub const Options = struct {
     events_max: u64,
     /// Terms the checker tracks before `TermsExhausted`.
     terms_max: u32,
+    /// The highest log index the checker can remember as chosen (>= `raft.log_entries_max`)
+    /// before `ChosenExhausted`; a compacting node commits far past its own log window.
+    chosen_entries_max: u32,
     plant: Plant,
 
     /// A healthy, lossless, fault-free cluster of `nodes_count` nodes: delays 1..10 ms,
@@ -167,8 +173,9 @@ pub const Options = struct {
                 .inflight_max = 4,
                 .log_entries_max = 64,
                 .log_bytes_max = 64 * workload_module.command_bytes,
-                // The sim state machine has no snapshot stream yet (`snapshot_bytes_max = 0`), so
-                // compaction is off. Plan 005 item 6 gives the sim real snapshots and turns it on.
+                // Compaction is off in the presets; a caller turns it on by setting
+                // `snapshot_entries_min`, `snapshot_trailing` and `message_limits.
+                // snapshot_bytes_max` (see `sim_snapshots.compaction_on`).
                 .snapshot_entries_min = 0,
                 .snapshot_trailing = 0,
                 .message_limits = .{
@@ -197,6 +204,7 @@ pub const Options = struct {
             .search_steps_max = 10_000_000,
             .events_max = 200_000,
             .terms_max = 256,
+            .chosen_entries_max = 4096,
             .plant = .none,
         };
     }
@@ -240,6 +248,9 @@ pub const Stats = struct {
     /// Seeded proposals a leader accepted (`ProposeNotLeader` and `ProposeLogFull` do not
     /// count).
     proposed: u64,
+    /// Snapshots a driver took and saved, and snapshots a follower installed.
+    snapshots: u64,
+    installs: u64,
     workload: Workload.Stats,
     network: Network.Stats,
     /// A hash of the network trace, the event count, the clock, every applied entry's
@@ -250,7 +261,13 @@ pub const Stats = struct {
 
 /// Limits of the harness itself; not safety violations. `HistoryTooLong` and `CheckInconclusive`
 /// come from `check(.linearizability)`.
-pub const LimitError = error{ EventsExhausted, TermsExhausted, HistoryTooLong, CheckInconclusive };
+pub const LimitError = error{
+    EventsExhausted,
+    TermsExhausted,
+    ChosenExhausted,
+    HistoryTooLong,
+    CheckInconclusive,
+};
 
 /// Everything a node, its store or its state machine can report through a `Driver`.
 pub const NodeError = raft.InvariantError || raft.InitError || raft.ReceiveError ||
@@ -315,6 +332,8 @@ pub const Simulation = struct {
     propose_next_ms: u64,
     workload_prng: Prng,
     propose_seq: u8,
+    /// Snapshots saved and installed, and what the checker was told about each node.
+    snapshots: sim_snapshots.Tracker,
 
     /// In place: the simulation must not move afterwards. Builds the cluster from `options`
     /// (ADR-008 argument order: `io` then `gpa`). On error nothing is left allocated.
@@ -347,6 +366,7 @@ pub const Simulation = struct {
         simulation.cut_slot = null;
         simulation.heal_at_ms = std.math.maxInt(u64);
         simulation.propose_seq = 0;
+        simulation.snapshots = sim_snapshots.Tracker.empty;
         simulation.schedule_start(options);
 
         const network_options: Network.Options = .{
@@ -362,6 +382,7 @@ pub const Simulation = struct {
         try simulation.checker.init(gpa, .{
             .nodes_count = options.nodes_count,
             .log_entries_max = options.raft.log_entries_max,
+            .chosen_entries_max = options.chosen_entries_max,
             .terms_max = options.terms_max,
         });
         errdefer simulation.checker.deinit(gpa);
@@ -425,7 +446,8 @@ pub const Simulation = struct {
         return spec;
     }
 
-    /// Refuses fault and proposal settings that could never run, before `init` allocates.
+    /// Refuses fault, proposal and snapshot settings that could never run, before `init`
+    /// allocates.
     fn options_validate(options: *const Options) OptionsError!void {
         const faults = options.faults;
         if (faults.crash_percent > 100) return error.CrashPercentInvalid;
@@ -442,6 +464,10 @@ pub const Simulation = struct {
             options.search_steps_max,
             options.raft.message_limits.entry_bytes_max,
         );
+        // After the workload check, which refuses `keys_count == 0`: a whole KV snapshot must fit.
+        if (!sim_snapshots.buffers_fit(&options.raft, options.workload.keys_count)) {
+            return error.WorkloadInvalid;
+        }
         if (options.proposals.interval_ms_max > 0) {
             const bytes_max = options.raft.message_limits.entry_bytes_max;
             if (options.proposals.data_bytes == 0) return error.ProposalBytesInvalid;
@@ -584,6 +610,8 @@ pub const Simulation = struct {
             .truncates = simulation.truncates_total(),
             .partitions = simulation.partitions,
             .proposed = simulation.proposed,
+            .snapshots = simulation.snapshots.saved,
+            .installs = simulation.snapshots.installs,
             .workload = simulation.workload.stats(),
             .network = simulation.network.stats(),
             .digest = simulation.digest(),
@@ -771,6 +799,8 @@ pub const Simulation = struct {
         };
         sim_node.down = false;
         simulation.checker.restarted(slot);
+        const node_status = sim_node.driver.node.status();
+        try simulation.snapshots.restarted(&simulation.checker, slot, &node_status, &sim_node.kv);
         simulation.restarts += 1;
     }
 
@@ -915,11 +945,31 @@ pub const Simulation = struct {
         }
         try simulation.network.check_invariants();
         try simulation.checker.observe(observations[0..up_count]);
+        try simulation.snapshots_report(); // Installs move applied indexes before `drain`.
         for (simulation.nodes[0..count], 0..) |*sim_node, slot| {
             try simulation.drain(@intCast(slot), &sim_node.kv);
         }
         assert(count <= nodes_max);
         simulation.failed_allowed();
+    }
+
+    /// Tells the checker about every snapshot saved or installed in this event, node by node.
+    fn snapshots_report(simulation: *Simulation) Error!void {
+        const count = simulation.options.nodes_count;
+        assert(count <= nodes_max);
+        for (simulation.nodes[0..count], 0..) |*sim_node, slot| {
+            if (sim_node.down) continue;
+
+            const node_status = sim_node.driver.node.status();
+            try simulation.snapshots.report(
+                &simulation.checker,
+                @intCast(slot),
+                &node_status,
+                &sim_node.kv,
+            );
+        }
+        assert(count >= 2);
+        assert(simulation.snapshots.installs <= simulation.events);
     }
 
     /// Hands the applies of node `slot` to the checker and the workload, in apply order.
@@ -987,10 +1037,10 @@ pub const Simulation = struct {
             .store = .{
                 .entries_max = config.log_entries_max,
                 .data_bytes_max = config.log_bytes_max,
-                .snapshot_bytes_max = 0,
+                .snapshot_bytes_max = sim_snapshots.store_bytes_max(&config),
             },
             .journal_ops_max = journal_ops_max,
-            .journal_bytes_max = config.log_bytes_max,
+            .journal_bytes_max = sim_snapshots.journal_bytes_max(&config),
             .fault = store_fault_of(simulation.options.plant),
         };
         try sim_node.store.init(gpa, &store_options);
@@ -999,6 +1049,7 @@ pub const Simulation = struct {
         try sim_node.kv.init(gpa, .{
             .keys_count = simulation.options.workload.keys_count,
             .applied_max = config.log_entries_max,
+            .fault = kv_fault_of(simulation.options.plant),
         });
         errdefer sim_node.kv.deinit(gpa);
 
@@ -1059,13 +1110,22 @@ fn fault_of(plant: Plant) Network.Fault {
         .flip_data => .flip_data,
         .lose_synced_hard_state => .none,
         .ack_uncommitted => .none,
+        .restore_drops_key => .none,
+    };
+}
+
+/// The state machine fault a `Plant` stands for; the other plants leave the machine honest.
+fn kv_fault_of(plant: Plant) KvStateMachine.Fault {
+    return switch (plant) {
+        .restore_drops_key => .restore_drops_key,
+        .none, .forge_votes, .flip_data, .lose_synced_hard_state, .ack_uncommitted => .none,
     };
 }
 
 /// The store fault a `Plant` stands for; the other plants leave the store honest.
 fn store_fault_of(plant: Plant) CrashStore.Fault {
     return switch (plant) {
-        .none, .forge_votes, .flip_data, .ack_uncommitted => .none,
+        .none, .forge_votes, .flip_data, .ack_uncommitted, .restore_drops_key => .none,
         .lose_synced_hard_state => .lose_synced_hard_state,
     };
 }

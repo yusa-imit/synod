@@ -21,7 +21,12 @@ const Observation = invariants.Observation;
 const Property = invariants.Property;
 const Violation = invariants.Violation;
 
-const options3: Checker.Options = .{ .nodes_count = 3, .log_entries_max = 8, .terms_max = 16 };
+const options3: Checker.Options = .{
+    .nodes_count = 3,
+    .log_entries_max = 8,
+    .chosen_entries_max = 8,
+    .terms_max = 16,
+};
 const checked = [_]Property{
     .election_safety,
     .leader_append_only,
@@ -191,6 +196,7 @@ test "invariants: a one-node cluster observes its own leader and commits" {
     const small: Checker.Options = .{
         .nodes_count = 1,
         .log_entries_max = 2,
+        .chosen_entries_max = 2,
         .terms_max = 2,
     };
     try checker.init(testing.allocator, small);
@@ -211,6 +217,7 @@ test "invariants: a log of exactly log_entries_max entries is accepted and commi
     const small: Checker.Options = .{
         .nodes_count = 2,
         .log_entries_max = 4,
+        .chosen_entries_max = 4,
         .terms_max = 4,
     };
     try checker.init(testing.allocator, small);
@@ -258,6 +265,7 @@ test "invariants: a leader term above terms_max is TermsExhausted and not record
     const small: Checker.Options = .{
         .nodes_count = 3,
         .log_entries_max = 4,
+        .chosen_entries_max = 4,
         .terms_max = 3,
     };
     try checker.init(testing.allocator, small);
@@ -641,6 +649,7 @@ test "invariants: stats counts leader terms once each and tracks the highest cho
     const small: Checker.Options = .{
         .nodes_count = 3,
         .log_entries_max = 8,
+        .chosen_entries_max = 8,
         .terms_max = 8,
     };
     try checker.init(testing.allocator, small);
