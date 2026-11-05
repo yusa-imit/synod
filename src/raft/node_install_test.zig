@@ -801,3 +801,48 @@ test "install cluster: a node cut off across compactions catches up by snapshot,
     try testing.expectEqual(c.applied[0], c.applied[1]);
     try testing.expectEqual(leader.status().last_index, c.rigs[2].node.status().last_index);
 }
+
+// The leader may compact past the snapshot in flight to a peer. The ack then resumes the peer at
+// `match + 1`, which the log no longer holds, so the leader must send a newer snapshot at once
+// (the relaxed `state != .snapshot` assertion in `step_snapshot_response`).
+test "install cluster: an ack after the leader compacted past it triggers a second snapshot" {
+    var c: Cluster = undefined;
+    try c.init();
+    defer c.deinit();
+    var guard: u32 = 0;
+    while (c.rigs[0].node.status().role != .leader) : (guard += 1) {
+        try testing.expect(guard < 40);
+        try c.tick(0);
+    }
+
+    c.cut[2] = true;
+    for (0..8) |number| try c.propose(@intCast(number));
+    const leader = &c.rigs[0].node;
+    try testing.expect(@intFromEnum(leader.log.base.index) >= 2);
+
+    // Let node 3 back in until the leader sends it a snapshot; keep that packet undelivered.
+    c.cut[2] = false;
+    guard = 0;
+    while (fixtures.leader_progress(leader)[1].state != .snapshot) : (guard += 1) {
+        try testing.expect(guard < 40);
+        try c.settle(0, try leader.step(.tick));
+    }
+    const sent = fixtures.leader_progress(leader)[1].next;
+    c.cut[2] = true; // The ack of the snapshot in flight will be lost, and sent late by hand.
+    try c.drain();
+    try testing.expectEqual(@as(u32, 1), c.installs[2]);
+
+    for (8..16) |number| try c.propose(@intCast(number));
+    try testing.expect(@intFromEnum(leader.log.base.index) >= @intFromEnum(sent));
+    const before = fixtures.leader_progress(leader)[1];
+    try testing.expectEqual(progress_module.State.snapshot, before.state);
+
+    const ack = snapshot_ack(3, @intFromEnum(leader.status().term), @intFromEnum(sent) - 1);
+    const effects = try recv(&c.rigs[0], ack);
+    const p = fixtures.leader_progress(leader)[1];
+    try testing.expectEqual(idx(@intFromEnum(sent) - 1), p.match);
+    try testing.expectEqual(@as(u32, 1), snapshots_to(effects, 3));
+    try testing.expectEqual(@as(u32, 0), appends_to(effects, 3));
+    try testing.expectEqual(progress_module.State.snapshot, p.state);
+    try testing.expect(@intFromEnum(p.next) > @intFromEnum(p.match) + 1);
+}

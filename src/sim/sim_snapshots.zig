@@ -107,7 +107,10 @@ pub const Tracker = struct {
 
     /// Reports node `slot`'s change after an event to `checker`: an install moves its applied
     /// index first, then the state digest at the snapshot index is compared with every other
-    /// node's. Precondition: `applied_index` is where the state machine stands.
+    /// node's. Precondition: `applied_index` is where the state machine stands. A changed
+    /// snapshot index always equals `applied_index` here: the node emits `snapshot_due` last in
+    /// the step that applied through its index and the driver confirms it in the same poll
+    /// (ADR-009), and an install applies nothing above its index before the event ends.
     pub fn report(
         tracker: *Tracker,
         checker: *Checker,
