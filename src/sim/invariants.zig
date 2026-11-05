@@ -447,11 +447,10 @@ pub const Checker = struct {
         }
         const term: u64 = @intFromEnum(one.status.term);
         for (@as(usize, @intCast(seen))..@as(usize, @intCast(commit))) |i| {
-            if (i < base) { // Compacted: only an already chosen index may be skipped.
-                if (i >= checker.chosen_max) return checker.fail(.state_machine_safety);
-                continue;
-            }
-            const have = checker.scratch[i - @as(usize, @intCast(base))];
+            const have = if (i < base) // Compacted: chosen already, or in a leader's old window.
+                checker.compacted_print(one, i) orelse return checker.fail(.state_machine_safety)
+            else
+                checker.scratch[i - @as(usize, @intCast(base))];
             if (i < checker.chosen_max) {
                 if (have != checker.chosen_prints[i]) {
                     return checker.fail(.state_machine_safety);
@@ -465,6 +464,22 @@ pub const Checker = struct {
             checker.chosen_max += 1;
         }
         memory.commit = commit;
+    }
+
+    /// The fingerprint at the absolute 0-based position `at`, below the window of `one`, that a
+    /// commit skipped: the chosen one, or (for an index not chosen yet) the one in the previous
+    /// window of a node that led in the same term, which never truncates. `null`: unverifiable.
+    fn compacted_print(checker: *const Checker, one: *const Observation, at: usize) ?u64 {
+        assert(at < window_base(one).?);
+        if (at < checker.chosen_max) return checker.chosen_prints[at];
+        const memory = &checker.nodes[one.node_index];
+        if (!memory.leading) return null;
+        if (memory.leader_term != @intFromEnum(one.status.term)) return null;
+        if (at < memory.leader_base) return null; // Compacted before it was last seen.
+        const offset = at - @as(usize, @intCast(memory.leader_base));
+        if (offset >= memory.leader_len) return null;
+        const log_max: usize = checker.options.log_entries_max;
+        return checker.leader_prints[one.node_index * log_max ..][offset];
     }
 
     /// Election safety: at most one leader per term.

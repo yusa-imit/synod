@@ -40,6 +40,7 @@ All notable changes to this project are documented in this file. Format follows
   (`Checker.Options.chosen_entries_max`); `Plant.restore_drops_key`; `Stats.snapshots` and
   `Stats.installs`. The simulator now runs with compaction on, and the workload test is back to
   `log_entries_max = 64`.
+  A leader that commits and compacts in one event is verified from its previous window.
 
 ## [0.5.0] - 2026-10-27
 

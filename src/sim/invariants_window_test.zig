@@ -336,3 +336,59 @@ test "window: Simulation reports ChosenExhausted when commits pass chosen_entrie
     }
     try testing.expect(exhausted > 0);
 }
+
+/// A fresh checker that has seen a leader of term 2 holding the window 1..4 (nothing committed).
+fn with_leader_window(checker: *Checker) !void {
+    try checker.init(gpa, options);
+    errdefer checker.deinit(gpa);
+    try checker.observe(&.{obs_role(0, .leader, 0, 0, full[0..4])});
+    try testing.expectEqual(@as(u64, 0), checker.stats().committed_max);
+}
+
+test "window: a leader that commits and compacts in one event keeps its previous prints" {
+    var checker: Checker = undefined;
+    try with_leader_window(&checker);
+    defer checker.deinit(gpa);
+    // Commit jumps 0 -> 6 and the window slides to 5..8: indexes 1..4 were never seen committed.
+    try checker.observe(&.{obs_role(0, .leader, 6, 4, full[4..8])});
+    try testing.expectEqual(@as(u64, 6), checker.stats().committed_max);
+    try expect_latched_only_none(&checker);
+    // The skipped indexes were chosen with the leader's own prints: a follower holding a
+    // different entry at index 2 contradicts them.
+    const forged = [_]Entry{ full[0], fx.entry(2, 1, "x"), full[2], full[3] };
+    try testing.expectError(error.StateMachineSafety, checker.observe(&.{obs(1, 4, 0, &forged)}));
+    try expect_latched_only(&checker, .state_machine_safety);
+}
+
+test "window: a follower that commits and compacts in one event stays unverifiable" {
+    var checker: Checker = undefined;
+    try checker.init(gpa, options);
+    defer checker.deinit(gpa);
+    try checker.observe(&.{obs(0, 0, 0, full[0..4])});
+    try testing.expectError(
+        error.StateMachineSafety,
+        checker.observe(&.{obs(0, 6, 4, full[4..8])}),
+    );
+    try expect_latched_only(&checker, .state_machine_safety);
+}
+
+test "window: a leader whose previous window misses a skipped index is unverifiable" {
+    var checker: Checker = undefined;
+    try checker.init(gpa, options);
+    defer checker.deinit(gpa);
+    try checker.observe(&.{obs_role(0, .leader, 0, 0, full[0..2])}); // Window 1..2 only.
+    // Indexes 3 and 4 were compacted unseen: the previous window does not hold them.
+    try testing.expectError(
+        error.StateMachineSafety,
+        checker.observe(&.{obs_role(0, .leader, 6, 4, full[4..8])}),
+    );
+    try expect_latched_only(&checker, .state_machine_safety);
+}
+
+fn expect_latched_only_none(checker: *const Checker) !void {
+    const all = [_]invariants.Property{
+        .election_safety,     .leader_append_only,   .log_matching,
+        .leader_completeness, .state_machine_safety,
+    };
+    for (all) |property| try checker.check(property);
+}
