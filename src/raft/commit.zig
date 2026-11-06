@@ -125,7 +125,7 @@ fn quorum_index(node: *const Node, set: []const NodeId) u64 {
 
     const sorted = matches[0..set.len];
     std.mem.sort(u64, sorted, {}, std.sort.desc(u64));
-    const result = sorted[election.majority(@intCast(set.len)) - 1];
+    const result = sorted[membership.majority(@intCast(set.len)) - 1];
     assert(result <= sorted[0]);
     return result;
 }
@@ -143,8 +143,8 @@ fn match_of(node: *const Node, voter: NodeId) u64 {
 
 const std = @import("std");
 const assert = std.debug.assert;
-const election = @import("election.zig");
 const leader_module = @import("leader.zig");
+const membership = @import("membership.zig");
 const node_module = @import("node.zig");
 const types = @import("../types.zig");
 

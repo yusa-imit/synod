@@ -443,11 +443,7 @@ pub const Node = struct {
     fn quorum_held(node: *const Node) bool {
         assert(node.role == .candidate or node.role == .pre_candidate);
         assert(node.votes_len <= node.votes.len);
-        return election.quorum_reached(
-            node.configuration.voters,
-            node.configuration.voters_outgoing,
-            node.votes[0..node.votes_len],
-        );
+        return membership.quorum_reached(&node.configuration, node.votes[0..node.votes_len]);
     }
 
     fn step_tick(node: *Node) void {
@@ -468,11 +464,7 @@ pub const Node = struct {
         // A learner or a node outside the configuration waits; it never campaigns.
         if (!voter or term_exhausted) return;
         // A candidate whose timer expires campaigns again; a lone voter needs no pre-vote.
-        const lone = election.quorum_reached(
-            configuration.voters,
-            configuration.voters_outgoing,
-            &.{node.config.id},
-        );
+        const lone = membership.quorum_reached(configuration, &.{node.config.id});
         if (node.role == .candidate or lone) return node.campaign();
         node.start_pre_vote();
         assert(node.effects_len <= node.effects.len);
@@ -721,6 +713,7 @@ const follower_module = @import("follower.zig");
 const interfaces = @import("../interfaces.zig");
 const leader_module = @import("leader.zig");
 const log_module = @import("../log.zig");
+const membership = @import("membership.zig");
 const node_init = @import("node_init.zig");
 const snapshot_module = @import("snapshot.zig");
 const types = @import("../types.zig");
