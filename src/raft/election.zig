@@ -1,6 +1,6 @@
 //! synod.raft.election — the pure rules of a Raft election (Raft thesis §3.4, §5.4.1) as free
-//! functions over plain values: the up-to-date comparison, the joint-shaped quorum, set
-//! membership and the next term. `Node` owns every state change; this file owns the decisions.
+//! functions over plain values: the up-to-date comparison, set membership and the
+//! next term (quorum math lives in `membership.zig`). `Node` owns every state change; this file owns the decisions.
 //!
 //! Invariants: every function is total over its documented domain, allocates nothing and reads
 //! no state beyond its arguments, so the model-based election tests can state the same rules
@@ -57,41 +57,6 @@ pub fn pre_vote_grantable(
     const grant = !leads and leader_silent and log_ok;
     assert(!grant or !leads);
     return grant;
-}
-
-/// Strictly more than half of `size`: `size / 2 + 1`. A voter set is never empty.
-pub fn majority(size: u32) u32 {
-    assert(size > 0);
-    assert(size <= types.voters_max);
-    const result = @divFloor(size, 2) + 1;
-    assert(result <= size);
-    return result;
-}
-
-/// Whether `granted` (distinct voter ids; ids outside the sets are ignored) carries a majority of
-/// `voters` and, when `voters_outgoing` is non-empty (joint configuration), also a majority of
-/// `voters_outgoing`. A voter in both sets counts in both.
-pub fn quorum_reached(
-    voters: []const NodeId,
-    voters_outgoing: []const NodeId,
-    granted: []const NodeId,
-) bool {
-    assert(voters.len > 0);
-    assert(granted.len <= 2 * types.voters_max);
-
-    if (granted_count(voters, granted) < majority(@intCast(voters.len))) return false;
-    if (voters_outgoing.len == 0) return true;
-    return granted_count(voters_outgoing, granted) >= majority(@intCast(voters_outgoing.len));
-}
-
-/// How many ids of `set` appear in `granted`.
-fn granted_count(set: []const NodeId, granted: []const NodeId) u32 {
-    assert(set.len <= types.voters_max);
-    assert(granted.len <= 2 * types.voters_max);
-    var total: u32 = 0;
-    for (set) |id| total += @intFromBool(contains(granted, id));
-    assert(total <= set.len);
-    return total;
 }
 
 /// The term after `current`. Precondition: `current` is below the largest term.

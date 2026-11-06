@@ -54,7 +54,7 @@ Every code item is one PR with a failing test first; `zig build test`, `zig fmt 
       applied index; the workload test returns to `log_entries_max = 64`. *Failing test
       first:* a planted restore that drops a key fails with its seed; 1000 seeds green with
       floors >= 30% seeds past 63 ops, >= 20% with an InstallSnapshot.
-- [ ] 7. **4B-i `src/raft/membership.zig` — codec and joint quorum.** Pure: `ConfChange` in
+- [x] 7. **4B-i `src/raft/membership.zig` — codec and joint quorum.** Pure: `ConfChange` in
       `Entry.data` (corrupt peer bytes are typed `Conf*` errors); a vote or match wins only
       with a majority of `voters` and, when joint, of `voters_outgoing`; legal transitions.
       *Failing test first:* a joint table where each side alone loses; codec round trip and a
