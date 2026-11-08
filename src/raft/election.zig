@@ -1,6 +1,7 @@
 //! synod.raft.election — the pure rules of a Raft election (Raft thesis §3.4, §5.4.1) as free
-//! functions over plain values: the up-to-date comparison, set membership and the
-//! next term (quorum math lives in `membership.zig`). `Node` owns every state change; this file owns the decisions.
+//! functions over plain values: the up-to-date comparison, set membership and the next term
+//! (quorum math lives in `membership.zig`). `Node` owns every state change; this file owns the
+//! decisions.
 //!
 //! Invariants: every function is total over its documented domain, allocates nothing and reads
 //! no state beyond its arguments, so the model-based election tests can state the same rules
