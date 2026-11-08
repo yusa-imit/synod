@@ -6,7 +6,7 @@
 //!     `Effect`, `Effects`, and the error sets, re-exported below.
 //!   - `raft/progress.zig`: implemented (plan 003 item 2C), internal (not re-exported)
 //!   - `raft/snapshot.zig`: planned
-//!   - `raft/membership.zig`: planned
+//!   - `raft/membership.zig`: implemented (plan 005 item 7)
 //!   - `raft/read.zig`: planned
 //!
 //! Status: skeleton. `Node` restores, validates and routes messages, applies the term rules and
@@ -15,6 +15,7 @@
 const std = @import("std");
 
 pub const node = @import("raft/node.zig");
+pub const membership = @import("raft/membership.zig");
 pub const Config = node.Config;
 pub const Restore = node.Restore;
 pub const Input = node.Input;
@@ -52,4 +53,6 @@ test {
     _ = @import("raft/node_install_test.zig");
     // Peer-reachable paths over a compacted log (review of plan 005 item 3) likewise.
     _ = @import("raft/node_base_test.zig");
+    // Conf-change codec and joint quorum rules (plan 005 item 7).
+    _ = @import("raft/membership_test.zig");
 }

@@ -7,6 +7,10 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- `raft/membership.zig` (plan 005 item 7): the `ConfChange` entry codec (`SYCC` magic, version,
+  crc32; `encode`, `decode`, typed `ConfDecodeError`), `enter_joint`/`leave_joint` builders and
+  the joint-aware `quorum_reached`/`quorum_index`. The election and commit paths now share its
+  `majority`/`quorum_reached`; `election.majority` and `election.quorum_reached` are removed.
 - `log.Log` base index (plan 005 item 2): `Base`, `reset`, `compact`, `last_term`, `entry_at`,
   `range`; `term_at` returns `error.LogCompacted` below the base; `validate` checks the first
   entry sits at `base + 1` (new `InvariantBaseMalformed`). The node still runs with a zero base.
