@@ -44,10 +44,14 @@ pub fn advance_leader(node: *Node) void {
     const last = @intFromEnum(node.log.last_index());
     assert(commit_before <= last);
 
-    var quorum = quorum_index(node, sets.voters);
-    if (sets.voters_outgoing.len > 0) {
-        quorum = @min(quorum, quorum_index(node, sets.voters_outgoing));
-    }
+    var voter_matches: [types.voters_max]u64 = undefined;
+    var outgoing_matches: [types.voters_max]u64 = undefined;
+    fill_matches(node, sets.voters, &voter_matches);
+    fill_matches(node, sets.voters_outgoing, &outgoing_matches);
+    const quorum = membership.quorum_index(sets, &.{
+        .voters = voter_matches[0..sets.voters.len],
+        .voters_outgoing = outgoing_matches[0..sets.voters_outgoing.len],
+    });
     assert(quorum <= last); // No peer matches beyond the leader's log.
     if (quorum <= commit_before) return;
     assert(node.log.base.index.order(node.commit_index) != .gt); // Base <= snapshot <= applied.
@@ -115,19 +119,12 @@ pub fn apply_ready(node: *Node) void {
 /// The most `leader_changed` effects a step emits: the deposed one and the new one.
 const notify_max: u32 = 2;
 
-/// The highest index that a majority of `set` (non-empty, within `voters_max`) matches: the
-/// leader matches its whole log, a peer its `Progress.match`, a voter without progress nothing.
-fn quorum_index(node: *const Node, set: []const NodeId) u64 {
-    assert(set.len > 0);
+/// Writes into `out` the match index of each voter of `set` (within `voters_max`): the leader
+/// matches its whole log, a peer its `Progress.match`, a voter without progress nothing.
+fn fill_matches(node: *const Node, set: []const NodeId, out: *[types.voters_max]u64) void {
     assert(set.len <= types.voters_max);
-    var matches: [types.voters_max]u64 = undefined;
-    for (set, 0..) |voter, i| matches[i] = match_of(node, voter);
-
-    const sorted = matches[0..set.len];
-    std.mem.sort(u64, sorted, {}, std.sort.desc(u64));
-    const result = sorted[membership.majority(@intCast(set.len)) - 1];
-    assert(result <= sorted[0]);
-    return result;
+    assert(node.role == .leader);
+    for (set, 0..) |voter, i| out[i] = match_of(node, voter);
 }
 
 fn match_of(node: *const Node, voter: NodeId) u64 {
