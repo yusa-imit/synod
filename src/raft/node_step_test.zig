@@ -389,6 +389,11 @@ fn describe_step_error(err: node_module.StepError) u8 {
         error.StepMisrouted => 2,
         error.SnapshotUnexpected => 2,
         error.ProposeNotLeader, error.ProposeTooLarge, error.ProposeLogFull => 3,
+        error.ConfChangeNotLeader,
+        error.ConfChangePending,
+        error.ConfChangeTooLarge,
+        error.ConfChangeLogFull,
+        => 4,
     };
 }
 

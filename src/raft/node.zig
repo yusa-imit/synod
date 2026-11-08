@@ -61,6 +61,7 @@ pub const Status = contract.Status;
 pub const InitError = contract.InitError;
 pub const ReceiveError = contract.ReceiveError;
 pub const ProposeError = contract.ProposeError;
+pub const ConfChangeError = contract.ConfChangeError;
 pub const StepError = contract.StepError;
 pub const InvariantError = contract.InvariantError;
 
@@ -228,6 +229,7 @@ pub const Node = struct {
             .message => |message| try node.step_message(message),
             .tick => node.step_tick(),
             .propose => |data| try node.step_propose(data),
+            .conf_change => return error.ConfChangeNotLeader, // Red stub (plan 005 item 8).
             .snapshot_saved => |index| {
                 try snapshot_module.saved(node, index);
                 // ADR-009: the driver asserts a save's Effects empty. A due owed now (applied
@@ -255,7 +257,14 @@ pub const Node = struct {
             .applied_index = node.applied_index,
             .last_index = node.log.last_index(),
             .snapshot_index = node.snapshot_index,
+            .configuration_index = .zero, // Red stub (plan 005 item 8).
         };
+    }
+
+    /// The configuration in force (it takes effect on append); borrowed until the next step.
+    pub fn configuration_current(node: *const Node) Configuration {
+        assert(node.configuration.voters.len > 0);
+        return node.configuration;
     }
 
     /// Borrowed until the next `step()`.

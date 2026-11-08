@@ -56,6 +56,9 @@ pub const Input = union(enum) {
     tick,
     /// Command bytes, borrowed until `step` returns. Leader only.
     propose: []const u8,
+    /// The target configuration (voters and learners, settled), borrowed until `step` returns.
+    /// The leader builds `enter_joint(current, target)` and appends it (ADR-009). Leader only.
+    conf_change: *const Configuration,
     /// The driver saved and synced the pending `snapshot_due` at this index. Emits nothing.
     snapshot_saved: Index,
 };
@@ -130,12 +133,21 @@ pub const Status = struct {
     last_index: Index,
     /// The index of the last snapshot the driver confirmed; zero when none.
     snapshot_index: Index,
+    /// The index of the entry that set the current configuration; zero when it is the base one.
+    configuration_index: Index = .zero,
 };
 
 pub const InitError = Allocator.Error || ConfError || error{ RestoreLogFull, RestoreInconsistent };
 pub const ReceiveError = MessageError || error{StepMisrouted};
 pub const ProposeError = error{ ProposeNotLeader, ProposeTooLarge, ProposeLogFull };
-pub const StepError = ReceiveError || ProposeError || error{SnapshotUnexpected};
+pub const ConfChangeError = ConfError || error{
+    ConfChangeNotLeader,
+    ConfChangePending,
+    ConfChangeTooLarge,
+    ConfChangeLogFull,
+};
+pub const StepError = ReceiveError || ProposeError || ConfChangeError ||
+    error{SnapshotUnexpected};
 pub const InvariantError = log_module.Log.InvariantError || error{
     InvariantCommitBeyondLog,
     InvariantAppliedBeyondCommit,
