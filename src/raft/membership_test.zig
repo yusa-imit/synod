@@ -757,8 +757,6 @@ fn fuzz_decode(_: void, smith: *testing.Smith) anyerror!void {
     try check_decoded(bytes, &storage);
 
     // A valid change always round trips.
-    var sorted_v: [16]u64 = undefined;
-    var sorted_o: [16]u64 = undefined;
     var vmask: u16 = smith.value(u16);
     var omask: u16 = smith.value(u16);
     if (vmask == 0) vmask = 1;
@@ -767,8 +765,6 @@ fn fuzz_decode(_: void, smith: *testing.Smith) anyerror!void {
     var lo: [16]NodeId = undefined;
     const sv = list_of(vmask, &lv);
     const so = list_of(omask, &lo);
-    for (sv, 0..) |id, i| sorted_v[i] = @intFromEnum(id);
-    for (so, 0..) |id, i| sorted_o[i] = @intFromEnum(id);
     const enter: ConfChange = .{ .enter_joint = .{
         .voters = sv,
         .voters_outgoing = so,

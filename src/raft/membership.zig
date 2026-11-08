@@ -64,6 +64,7 @@ pub fn encoded_bytes(change: *const ConfChange) u32 {
 /// Writes `change` to `out` and returns the byte count. Preconditions: `change` validates and
 /// `out.len >= encoded_bytes(change)`.
 pub fn encode(change: *const ConfChange, out: []u8) u32 {
+    assert(if (change.validate()) true else |_| false);
     const total = encoded_bytes(change);
     assert(out.len >= total);
     const configuration = configuration_of(change);
@@ -133,6 +134,8 @@ pub fn decode(
 
 /// `C_old,new`: `target`'s voters and learners, with `current`'s voters as the outgoing set.
 pub fn enter_joint(current: *const Configuration, target: *const Configuration) ConfChange {
+    assert(current.voters.len > 0);
+    assert(target.voters.len > 0);
     assert(current.voters_outgoing.len == 0);
     assert(target.voters_outgoing.len == 0);
     return .{ .enter_joint = .{
@@ -155,6 +158,7 @@ pub fn leave_joint(current: *const Configuration) ConfChange {
 /// The highest index a quorum matches: the lower of the majority matches of `voters` and, when
 /// joint, `voters_outgoing`. `matches` is aligned with the configuration's lists.
 pub fn quorum_index(configuration: *const Configuration, matches: *const Matches) u64 {
+    assert(configuration.voters.len > 0);
     assert(matches.voters.len == configuration.voters.len);
     assert(matches.voters_outgoing.len == configuration.voters_outgoing.len);
     var result = majority_match(matches.voters);
