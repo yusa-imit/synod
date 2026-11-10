@@ -40,6 +40,7 @@ fn quiet_status(term_value: u64, vote: u64) Status {
         .applied_index = .zero,
         .last_index = idx(3),
         .snapshot_index = .zero,
+        .configuration_index = .zero,
     };
 }
 
@@ -375,6 +376,11 @@ fn describe_step_error(err: node_module.StepError) u8 {
         error.ConfNodesUnsorted,
         error.ConfLearnerIsVoter,
         error.ConfJointShape,
+        error.ConfLength,
+        error.ConfMagic,
+        error.ConfVersion,
+        error.ConfKind,
+        error.ConfChecksum,
         => 0,
         error.MessageVersionUnsupported,
         error.MessageTermZero,

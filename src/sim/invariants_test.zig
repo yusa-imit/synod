@@ -45,6 +45,7 @@ fn obs(node: u8, role: raft.Role, term: u64, commit: u64, log: []const Entry) Ob
         .applied_index = fx.idx(0),
         .last_index = fx.idx(log.len),
         .snapshot_index = .zero,
+        .configuration_index = .zero,
     };
     return .{ .node_index = node, .status = status, .log = log };
 }

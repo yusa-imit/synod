@@ -55,6 +55,7 @@ test "node: a fresh restore starts a follower with zeroed status and no leader" 
         .applied_index = .zero,
         .last_index = .zero,
         .snapshot_index = .zero,
+        .configuration_index = .zero,
     };
     try testing.expectEqual(expected, rig.node.status());
     try testing.expectEqual(@as(usize, 0), rig.node.entries().len);
@@ -75,6 +76,7 @@ test "node: restore keeps term, vote, commit and last index and applies nothing 
         .applied_index = .zero, // A restarted node re-applies (0, commit_index] on its first step.
         .last_index = idx(3),
         .snapshot_index = .zero,
+        .configuration_index = .zero,
     };
     try testing.expectEqual(expected, rig.node.status());
     try fixtures.expect_entries_equal(&base_entries, rig.node.entries());
@@ -244,6 +246,11 @@ fn describe_init_error(err: node_module.InitError) u8 {
         error.ConfNodesUnsorted,
         error.ConfLearnerIsVoter,
         error.ConfJointShape,
+        error.ConfLength,
+        error.ConfMagic,
+        error.ConfVersion,
+        error.ConfKind,
+        error.ConfChecksum,
         => 1,
         error.RestoreLogFull => 2,
         error.RestoreInconsistent => 3,

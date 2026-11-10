@@ -134,11 +134,13 @@ pub const Status = struct {
     /// The index of the last snapshot the driver confirmed; zero when none.
     snapshot_index: Index,
     /// The index of the entry that set the current configuration; zero when it is the base one.
-    configuration_index: Index = .zero,
+    configuration_index: Index,
 };
 
-pub const InitError = Allocator.Error || ConfError || error{ RestoreLogFull, RestoreInconsistent };
-pub const ReceiveError = MessageError || error{StepMisrouted};
+pub const InitError = Allocator.Error || ConfError || membership.ConfDecodeError ||
+    error{ RestoreLogFull, RestoreInconsistent };
+pub const ReceiveError = MessageError || ConfError || membership.ConfDecodeError ||
+    error{StepMisrouted};
 pub const ProposeError = error{ ProposeNotLeader, ProposeTooLarge, ProposeLogFull };
 pub const ConfChangeError = ConfError || error{
     ConfChangeNotLeader,
@@ -159,6 +161,7 @@ pub const InvariantError = log_module.Log.InvariantError || error{
     InvariantProgressOrder,
     InvariantInflightOverflow,
     InvariantBaseBeyondApplied,
+    InvariantConfigurationInvalid,
 };
 
 const std = @import("std");
@@ -166,6 +169,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const interfaces = @import("../interfaces.zig");
 const log_module = @import("../log.zig");
+const membership = @import("membership.zig");
 const types = @import("../types.zig");
 
 const ConfError = types.ConfError;

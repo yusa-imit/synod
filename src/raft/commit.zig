@@ -39,6 +39,18 @@
 pub fn advance_leader(node: *Node) void {
     assert(node.role == .leader);
     assert(node.progress_len <= node.progress.len);
+    // A commit may complete a joint configuration's entry, which owes a `leave_joint`; a lone
+    // voter commits that one at once too, so at most two rounds.
+    for (0..2) |_| {
+        if (!advance_once(node)) return;
+        if (!reconfigure.leave_if_due(node)) return;
+    }
+}
+
+/// One pass of the commit rule; returns whether the commit index moved.
+fn advance_once(node: *Node) bool {
+    assert(node.role == .leader);
+    assert(node.progress_len <= node.progress.len);
     const sets = &node.configuration;
     const commit_before = @intFromEnum(node.commit_index);
     const last = @intFromEnum(node.log.last_index());
@@ -53,19 +65,20 @@ pub fn advance_leader(node: *Node) void {
         .voters_outgoing = outgoing_matches[0..sets.voters_outgoing.len],
     });
     assert(quorum <= last); // No peer matches beyond the leader's log.
-    if (quorum <= commit_before) return;
+    if (quorum <= commit_before) return false;
     assert(node.log.base.index.order(node.commit_index) != .gt); // Base <= snapshot <= applied.
     const quorum_term = node.log.term_at(@enumFromInt(quorum)) catch |err| switch (err) {
         // `quorum > commit_before >= log.base.index`: the base never passes the applied index,
         // which never passes the commit index, so `quorum` is above the base.
         error.LogCompacted => unreachable,
     };
-    if (quorum_term != node.term) return; // Figure 8.
+    if (quorum_term != node.term) return false; // Figure 8.
 
     node.commit_index = @enumFromInt(quorum);
     node.emit_hard_state();
     assert(@intFromEnum(node.commit_index) > commit_before);
     assert(@intFromEnum(node.commit_index) <= last);
+    return true;
 }
 
 /// The follower's commit rule after an accepted append: `last_new` is `prev_log_index +
@@ -143,6 +156,7 @@ const assert = std.debug.assert;
 const leader_module = @import("leader.zig");
 const membership = @import("membership.zig");
 const node_module = @import("node.zig");
+const reconfigure = @import("reconfigure.zig");
 const types = @import("../types.zig");
 
 const Index = types.Index;

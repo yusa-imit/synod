@@ -115,24 +115,25 @@ pub fn on_compact(node: *Node, through: Index) void {
 }
 
 /// Leader only: once the joint configuration's entry has committed, appends `leave_joint`. A full
-/// log defers it to the next call (every leader tick). Emits `append` (persist phase), so call it
+/// log defers it to the next call (every leader tick). Returns whether it appended. Emits `append` (persist phase), so call it
 /// before any send of the step.
-pub fn leave_if_due(node: *Node) void {
+pub fn leave_if_due(node: *Node) bool {
     assert(node.effects_len < node.effects.len);
-    if (node.role != .leader) return;
-    if (node.configuration.voters_outgoing.len == 0) return;
-    if (node.configuration_index.order(node.commit_index) == .gt) return;
+    if (node.role != .leader) return false;
+    if (node.configuration.voters_outgoing.len == 0) return false;
+    if (node.configuration_index.order(node.commit_index) == .gt) return false;
 
     var buffer: [membership.conf_bytes_max]u8 = undefined;
     const change = membership.leave_joint(&node.configuration);
     const used = membership.encode(&change, &buffer);
     const count_before = node.log.count;
     node_init.log_append(node, node.term, .conf_change, buffer[0..used]) catch |err| switch (err) {
-        error.LogFull => return,
+        error.LogFull => return false,
     };
     node.emit(.{ .append = node.log.entries[count_before..node.log.count] });
     assert(node.configuration.voters_outgoing.len == 0);
     assert(node.log.count == count_before + 1);
+    return true;
 }
 
 /// `Input.conf_change`: the leader appends `enter_joint(current, target)`. Refusals are typed and
@@ -287,11 +288,11 @@ fn region_size(node: *const Node) usize {
     return node.members.len / 3;
 }
 
-fn current_region(node: *const Node) []NodeId {
+pub fn current_region(node: *const Node) []NodeId {
     return node.members[0..region_size(node)];
 }
 
-fn base_region(node: *const Node) []NodeId {
+pub fn base_region(node: *const Node) []NodeId {
     const size = region_size(node);
     return node.members[size .. 2 * size];
 }

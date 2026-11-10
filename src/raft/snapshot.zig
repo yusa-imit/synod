@@ -54,7 +54,7 @@ pub fn emit_due(node: *Node) void {
     node.snapshot_pending = node.applied_index;
     node.emit(.{ .snapshot_due = .{
         .snapshot = .{ .index = node.applied_index, .term = entry_term },
-        .configuration = node.configuration,
+        .configuration = reconfigure.configuration_at(node, node.applied_index),
     } });
     assert(node.effects[node.effects_len - 1].phase() == .snapshot);
     assert(node.snapshot_pending == node.applied_index);
@@ -177,18 +177,20 @@ fn install(node: *Node, request: *const SnapshotRequest) void {
             error.LogCompacted => unreachable,
         }) == snap.term;
 
-    node.configuration = node_init.members_copy(node.members, &request.configuration);
-    node.emit(.{ .save_snapshot = .{ .snapshot = snap, .configuration = node.configuration } });
+    const base = node_init.members_copy(reconfigure.base_region(node), &request.configuration);
+    node.base_configuration = base;
+    node.emit(.{ .save_snapshot = .{ .snapshot = snap, .configuration = base } });
     node.snapshot_index = snap.index;
     node.snapshot_pending = .zero;
     node.commit_index = snap.index;
     node.applied_index = snap.index;
     if (holds) {
-        compact(node, snap.index);
+        compact_log(node, snap.index);
     } else {
         node.log.reset(.{ .index = snap.index, .term = snap.term });
         node.bytes_used = 0;
     }
+    reconfigure.rescan(node); // The snapshot's base, then any conf entry kept above it.
     assert(node.log.base.index == snap.index);
     assert(node.log.last_index().order(snap.index) != .lt);
 }
@@ -204,9 +206,17 @@ fn reply(node: *Node, to: NodeId, match_index: Index) void {
     assert(node.effects[node.effects_len - 1] == .send);
 }
 
-/// Drops the log through `through` and re-packs the arena. Preconditions: `base.index <=
-/// through <= snapshot_index`.
+/// Drops the log through `through`, first moving the base configuration to the one in force as
+/// of `through`. Preconditions: `base.index <= through <= snapshot_index`.
 fn compact(node: *Node, through: Index) void {
+    assert(through.order(node.log.base.index) != .lt);
+    assert(through.order(node.snapshot_index) != .gt);
+    reconfigure.on_compact(node, through);
+    compact_log(node, through);
+}
+
+/// Drops the log through `through` and re-packs the arena. Same preconditions as `compact`.
+fn compact_log(node: *Node, through: Index) void {
     assert(through.order(node.log.base.index) != .lt);
     assert(through.order(node.snapshot_index) != .gt);
     const bytes_before = node.bytes_used;
@@ -239,6 +249,7 @@ const follower_module = @import("follower.zig");
 const leader_module = @import("leader.zig");
 const node_init = @import("node_init.zig");
 const node_module = @import("node.zig");
+const reconfigure = @import("reconfigure.zig");
 const types = @import("../types.zig");
 
 const ConfError = types.ConfError;

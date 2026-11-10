@@ -135,6 +135,7 @@ const Model = struct {
                 .applied_index = fx.idx(model.node_applied[i]),
                 .last_index = fx.idx(log.len),
                 .snapshot_index = .zero,
+                .configuration_index = .zero,
             }, .log = log };
             model.reported_max = @max(model.reported_max, model.node_commit[i]);
         }
