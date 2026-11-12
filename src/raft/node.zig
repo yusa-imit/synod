@@ -407,6 +407,7 @@ pub const Node = struct {
         assert(head.from != node.config.id);
         assert(node.effects_len == 0);
         if (!member or !node_init.is_voter(node, head.from)) return;
+        if (!reconfigure.self_is_voter(node)) return; // A learner or outsider never answers.
 
         const last = node.log.last_index();
         const heard = node.role == .leader or
@@ -417,7 +418,7 @@ pub const Node = struct {
             request.last_log_index,
             request.last_log_term,
         );
-        const grant = reconfigure.self_is_voter(node) and election.pre_vote_grantable(
+        const grant = election.pre_vote_grantable(
             head.term,
             node.term,
             node.role == .leader,

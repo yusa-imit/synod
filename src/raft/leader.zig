@@ -195,7 +195,7 @@ pub fn step_response(node: *Node, reply: *const AppendResponse) void {
             remove_record(node, slot, at);
             // A new match may complete a quorum: persist the commit before the next send.
             if (p.on_accepted(matched)) commit_module.advance_leader(node);
-            if (p.next.order(node.log.last_index()) != .gt) send_slot(node, slot, peer);
+            send_if_behind(node, peer); // The commit may have removed the peer (a leave).
         },
         .rejected => |conflict| if (p.on_rejected(conflict, round.prev)) {
             send_slot(node, slot, peer); // The window is gone, so every record is dead.
@@ -222,11 +222,22 @@ pub fn step_snapshot_response(node: *Node, reply: *const SnapshotResponse) void 
 
     node.rounds.records[records_base(node, slot)] = Round.empty; // The install's record.
     commit_module.advance_leader(node); // A new match may complete a quorum.
-    if (p.next.order(node.log.last_index()) != .gt) send_slot(node, slot, peer);
+    send_if_behind(node, peer);
     // The ack resumed the peer at `match + 1`. It is back in `.snapshot` only when the log was
     // compacted past that point meanwhile: then a newer snapshot (above `match`) is in flight.
-    if (p.state == .snapshot) assert(@intFromEnum(p.next) > @intFromEnum(p.match) + 1);
+    if (slot_of(node, peer)) |now| {
+        const q = &node.progress[now];
+        if (q.state == .snapshot) assert(@intFromEnum(q.next) > @intFromEnum(q.match) + 1);
+    }
     assert(node.effects_len <= 4); // `save_hard_state`, `append` (leave), one send.
+}
+
+/// Sends `peer` the entries it lacks, if it still has a slot (a commit may have removed it).
+fn send_if_behind(node: *Node, peer: NodeId) void {
+    assert(peer != node.config.id);
+    assert(node.role == .leader);
+    const slot = slot_of(node, peer) orelse return;
+    if (node.progress[slot].next.order(node.log.last_index()) != .gt) send_slot(node, slot, peer);
 }
 
 /// The progress slot of `peer`, or null for a stranger.
