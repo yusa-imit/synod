@@ -29,6 +29,7 @@ pub const Node = node.Node;
 pub const InitError = node.InitError;
 pub const ReceiveError = node.ReceiveError;
 pub const ProposeError = node.ProposeError;
+pub const ConfChangeError = node.ConfChangeError;
 pub const StepError = node.StepError;
 pub const InvariantError = node.InvariantError;
 
@@ -55,4 +56,8 @@ test {
     _ = @import("raft/node_base_test.zig");
     // Conf-change codec and joint quorum rules (plan 005 item 7).
     _ = @import("raft/membership_test.zig");
+    // Joint consensus in the node, leader side (plan 005 item 8).
+    _ = @import("raft/node_reconfigure_test.zig");
+    // Joint consensus in the node, follower, restore and non-voter side (plan 005 item 8).
+    _ = @import("raft/node_reconfigure_follower_test.zig");
 }

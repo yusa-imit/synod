@@ -51,6 +51,7 @@ fn obs_role(node: u8, role: raft.Role, commit: u64, base: u64, log: []const Entr
         .applied_index = fx.idx(0),
         .last_index = fx.idx(base + log.len),
         .snapshot_index = .zero,
+        .configuration_index = .zero,
     };
     return .{ .node_index = node, .status = status, .log = log };
 }

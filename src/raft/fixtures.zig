@@ -14,11 +14,13 @@ const assert = std.debug.assert;
 const interfaces = @import("../interfaces.zig");
 const types = @import("../types.zig");
 const node_module = @import("node.zig");
+const membership = @import("membership.zig");
 const progress_module = @import("progress.zig");
 
 const AppendRequest = types.AppendRequest;
 const AppendResponse = types.AppendResponse;
 const Config = node_module.Config;
+const ConfChange = types.ConfChange;
 const Configuration = types.Configuration;
 const Effect = node_module.Effect;
 const Effects = node_module.Effects;
@@ -488,4 +490,220 @@ pub fn append_request(
 pub fn log_restore(buffer: []Entry, count: u32, hard_term: u64, commit: u64) Restore {
     const log = fill_entries(buffer, count, 1);
     return restore_of(hard_state_of(hard_term, 0, commit), log);
+}
+
+// ---- joint consensus (plan 005 item 8) -----------------------------------------------------
+
+/// `config` for membership changes: up to five voters and two learners per set, room for a
+/// 109-byte conf entry (5 + 5 voters + 2 learners), 16 slots and 512 entry bytes.
+pub const config_conf: Config = blk: {
+    var result = config;
+    result.voters_max = 5;
+    result.log_entries_max = 16;
+    result.log_bytes_max = 512;
+    result.message_limits.entries_max = 8;
+    result.message_limits.entry_bytes_max = 128;
+    break :blk result;
+};
+
+/// Owns the bytes of one encoded `ConfChange`, so an `Entry` built from it can be borrowed.
+pub const ConfBytes = struct {
+    buffer: [membership.conf_bytes_max]u8 = undefined,
+    len: u32 = 0,
+
+    /// A `conf_change` entry at (`index`, `term_value`) carrying `change`, which must validate.
+    pub fn entry(self: *ConfBytes, index: u64, term_value: u64, change: ConfChange) Entry {
+        self.len = membership.encode(&change, &self.buffer);
+        return .{
+            .index = idx(index),
+            .term = term(term_value),
+            .kind = .conf_change,
+            .data = self.buffer[0..self.len],
+        };
+    }
+};
+
+pub fn conf_of(
+    voters_in: []const NodeId,
+    outgoing: []const NodeId,
+    learners: []const NodeId,
+) Configuration {
+    return .{ .voters = voters_in, .voters_outgoing = outgoing, .learners = learners };
+}
+
+/// Same three lists, id by id.
+pub fn expect_configuration(want: Configuration, got: Configuration) !void {
+    try testing.expectEqualSlices(NodeId, want.voters, got.voters);
+    try testing.expectEqualSlices(NodeId, want.voters_outgoing, got.voters_outgoing);
+    try testing.expectEqualSlices(NodeId, want.learners, got.learners);
+}
+
+/// Decodes the `data` of a `conf_change` entry; fails the test if it is not one that decodes.
+pub fn decode_conf(entry_value: Entry, ids: *[membership.conf_ids_max]NodeId) !ConfChange {
+    try testing.expectEqual(types.EntryKind.conf_change, entry_value.kind);
+    return membership.decode(entry_value.data, ids);
+}
+
+/// Steps `input` and checks the ADR-007 phase order and `check_invariants()` afterwards.
+pub fn step_checked(rig: *Rig, input: node_module.Input) !Effects {
+    const effects = try rig.node.step(input);
+    try expect_effects_ordered(effects, rig.node.config);
+    try rig.node.check_invariants();
+    return effects;
+}
+
+/// Like `Rig.receive`, with the checks of `step_checked`.
+pub fn receive_checked(rig: *Rig, message: *const Message) !Effects {
+    return step_checked(rig, .{ .message = message });
+}
+
+/// Ticks node 1 to a pre-candidate, then feeds pre-vote and vote grants from `grants` (in
+/// order) until it leads; returns the winning step's effects. Needs `init_fixed(.., 0)`.
+pub fn elect_checked(rig: *Rig, grants: []const u64) !Effects {
+    var guard: u32 = 0;
+    while (rig.node.status().role != .pre_candidate) : (guard += 1) {
+        if (guard >= 40) return error.TestUnexpectedResult;
+        _ = try step_checked(rig, .tick);
+    }
+    const would_be = @intFromEnum(rig.node.status().term) + 1;
+    var used: usize = 0;
+    while (rig.node.status().role == .pre_candidate) : (used += 1) {
+        if (used >= grants.len) return error.TestUnexpectedResult;
+        const grant = pre_vote_response(grants[used], 1, would_be, true);
+        _ = try receive_checked(rig, &grant);
+    }
+    const at = @intFromEnum(rig.node.status().term);
+    var effects: Effects = .{ .items = &.{} };
+    used = 0;
+    while (rig.node.status().role == .candidate) : (used += 1) {
+        if (used >= grants.len) return error.TestUnexpectedResult;
+        const grant = vote_response(grants[used], 1, at, true);
+        effects = try receive_checked(rig, &grant);
+    }
+    if (rig.node.status().role != .leader) return error.TestUnexpectedResult;
+    return effects;
+}
+
+/// Node 1 (leader) hears from `request.header.to` that it accepted `request` through its last
+/// entry; returns the step's effects.
+pub fn accept(rig: *Rig, request: AppendRequest) !Effects {
+    const reply: Message = .{ .append_entries_response = .{
+        .header = header_of(
+            @intFromEnum(request.header.to),
+            1,
+            @intFromEnum(rig.node.status().term),
+        ),
+        .round = request.round,
+        .outcome = .{ .accepted = idx(last_of(request)) },
+    } };
+    return receive_checked(rig, &reply);
+}
+
+/// Accepts, one step each and in the order of `peers`, the `append_entries` of `effects` to
+/// those peers (all captured before the first step); follow-up sends are not answered. Returns
+/// the effects of the last step.
+pub fn accept_each(rig: *Rig, effects: Effects, peers: []const u64) !Effects {
+    var requests: [16]AppendRequest = undefined;
+    assert(peers.len <= requests.len);
+    for (peers, 0..) |peer, i| requests[i] = try append_to(effects, peer);
+    var last: Effects = .{ .items = &.{} };
+    for (requests[0..peers.len]) |request| last = try accept(rig, request);
+    return last;
+}
+
+/// What a run of steps showed the driver, beyond the final state.
+pub const Trace = struct {
+    /// `leader_changed(.none)` notifications seen.
+    demotions: u32 = 0,
+
+    fn observe(trace: *Trace, effects: Effects) void {
+        for (effects.items) |effect| switch (effect) {
+            .leader_changed => |leader| trace.demotions += @intFromBool(leader == .none),
+            else => {},
+        };
+    }
+};
+
+/// Accepts, through its last entry, every `append_entries` in `effects` addressed to a node in
+/// `peers`, and every one the answers provoke in turn, until nothing is left to answer. Peers
+/// not listed stay silent.
+pub fn answer(rig: *Rig, effects: Effects, peers: []const u64, trace: *Trace) !void {
+    var queue: [32]AppendRequest = undefined;
+    var queued = collect_appends(effects, peers, &queue, 0);
+    var guard: u32 = 0;
+    while (queued > 0) : (guard += 1) {
+        if (guard >= 64) return error.TestUnexpectedResult;
+        queued -= 1;
+        const answered = try accept(rig, queue[queued]);
+        trace.observe(answered);
+        queued = collect_appends(answered, peers, &queue, queued);
+    }
+}
+
+/// Runs `ticks` ticks, `answer`ing the sends of each.
+pub fn drive(rig: *Rig, peers: []const u64, ticks: u32, trace: *Trace) !void {
+    for (0..ticks) |_| {
+        const effects = try step_checked(rig, .tick);
+        trace.observe(effects);
+        try answer(rig, effects, peers, trace);
+    }
+}
+
+/// A copy of what a refused step must leave alone: the status and the three id lists.
+pub const Frozen = struct {
+    status: node_module.Status,
+    ids: [membership.conf_ids_max]NodeId,
+    counts: [3]usize,
+
+    pub fn take(node: *const Node) Frozen {
+        var frozen: Frozen = .{
+            .status = node.status(),
+            .ids = undefined,
+            .counts = undefined,
+        };
+        const current = node.configuration_current();
+        const lists = [3][]const NodeId{
+            current.voters,
+            current.voters_outgoing,
+            current.learners,
+        };
+        var at: usize = 0;
+        for (lists, 0..) |list, i| {
+            @memcpy(frozen.ids[at..][0..list.len], list);
+            frozen.counts[i] = list.len;
+            at += list.len;
+        }
+        return frozen;
+    }
+
+    pub fn expect_same(frozen: *const Frozen, node: *const Node) !void {
+        try testing.expectEqual(frozen.status, node.status());
+        const now = Frozen.take(node);
+        try testing.expectEqual(frozen.counts, now.counts);
+        const total = frozen.counts[0] + frozen.counts[1] + frozen.counts[2];
+        try testing.expectEqualSlices(NodeId, frozen.ids[0..total], now.ids[0..total]);
+    }
+};
+
+fn collect_appends(
+    effects: Effects,
+    peers: []const u64,
+    queue: *[32]AppendRequest,
+    start: usize,
+) usize {
+    var queued = start;
+    for (effects.items) |effect| switch (effect) {
+        .send => |message| switch (message) {
+            .append_entries => |request| {
+                for (peers) |peer| if (request.header.to == node_id(peer)) {
+                    assert(queued < queue.len);
+                    queue[queued] = request;
+                    queued += 1;
+                };
+            },
+            else => {},
+        },
+        else => {},
+    };
+    return queued;
 }

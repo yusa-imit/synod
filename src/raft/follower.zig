@@ -234,6 +234,7 @@ fn cut_log(node: *Node, keep: u32) void {
     node.log.truncate(from);
     node.bytes_used -= @intCast(freed);
     node.emit(.{ .truncate = from });
+    reconfigure.on_truncate(node, from); // A cut conf entry rolls the configuration back.
     assert(node.log.count == keep);
     assert(node.log.last_index().order(from) == .lt);
     assert(node.bytes_used <= node.bytes.len);
@@ -271,6 +272,7 @@ const assert = std.debug.assert;
 const commit_module = @import("commit.zig");
 const node_init = @import("node_init.zig");
 const node_module = @import("node.zig");
+const reconfigure = @import("reconfigure.zig");
 const types = @import("../types.zig");
 
 const AppendRequest = types.AppendRequest;

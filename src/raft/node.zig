@@ -61,6 +61,7 @@ pub const Status = contract.Status;
 pub const InitError = contract.InitError;
 pub const ReceiveError = contract.ReceiveError;
 pub const ProposeError = contract.ProposeError;
+pub const ConfChangeError = contract.ConfChangeError;
 pub const StepError = contract.StepError;
 pub const InvariantError = contract.InvariantError;
 
@@ -85,13 +86,17 @@ pub const Node = struct {
     rng: Rng,
     /// The node's copy of the cluster membership; its slices point into `members`.
     configuration: Configuration,
+    /// The index of the entry that set `configuration`; the log base when it is the base one.
+    configuration_index: Index,
+    /// The configuration as of `log.base.index` (`reconfigure.zig`); points into `members`.
+    base_configuration: Configuration,
     /// The hard state most recently emitted (or restored): a repeat is not emitted again.
     hard_state_saved: HardState,
     /// Entry-byte arena, `config.log_bytes_max` long; entry data is packed in index order.
     bytes: []u8,
     /// Bytes of `bytes` in use by live entries.
     bytes_used: u32,
-    /// Backing store for `configuration`: `2 * voters_max + learners_max` ids.
+    /// Backing store of the current, base and scratch configurations, one region each.
     members: []NodeId,
     /// Voters (self included) that granted this node's vote in the current campaign; only
     /// `votes[0..votes_len]` is live and it holds no duplicate. `2 * voters_max` long.
@@ -103,6 +108,8 @@ pub const Node = struct {
     /// Leader only: one `Progress` per other voter in `progress[0..progress_len]` (`leader.zig`).
     progress: []Progress,
     progress_len: u32,
+    /// Leader only: `peers[slot]` is the node `progress[slot]` tracks (`leader.zig`).
+    peers: []NodeId,
     /// Leader only: the records of the rounds in flight, and the round and tick counters.
     rounds: leader_module.Rounds,
 
@@ -143,11 +150,8 @@ pub const Node = struct {
         const leader_storage = try leader_module.Storage.init(gpa, &config);
         errdefer leader_storage.deinit(gpa);
 
-        @memset(log.entries, .{ .index = .zero, .term = .zero, .kind = .normal, .data = "" });
-        @memset(bytes, 0);
-        @memset(members, .none);
-        @memset(votes, .none);
-        @memset(effects, .{ .leader_changed = .none });
+        node_init.storage_clear(log.entries, bytes, members, votes, effects);
+        const region = node_init.members_split(members, &config);
         node.* = .{
             .config = config,
             .role = .follower,
@@ -162,7 +166,9 @@ pub const Node = struct {
             .election_timeout = node_init.election_timeout_draw(rng, config.election_ticks),
             .election_elapsed = 0,
             .rng = rng,
-            .configuration = node_init.members_copy(members, &restore.configuration),
+            .configuration = node_init.members_copy(region[0], &restore.configuration),
+            .configuration_index = restore.snapshot.index,
+            .base_configuration = node_init.members_copy(region[1], &restore.configuration),
             .hard_state_saved = restore.hard_state,
             .bytes = bytes,
             .bytes_used = 0,
@@ -173,6 +179,7 @@ pub const Node = struct {
             .effects_len = 0,
             .progress = leader_storage.progress,
             .progress_len = 0,
+            .peers = leader_storage.peers,
             .rounds = leader_storage.rounds,
         };
         node.log.reset(restore.snapshot);
@@ -200,6 +207,7 @@ pub const Node = struct {
         assert(node.members.len > 0);
 
         gpa.free(node.rounds.records);
+        gpa.free(node.peers);
         gpa.free(node.progress);
         gpa.free(node.effects);
         gpa.free(node.votes);
@@ -208,6 +216,7 @@ pub const Node = struct {
         node.log.deinit(gpa);
 
         node.progress = &.{};
+        node.peers = &.{};
         node.rounds.records = &.{};
         node.effects = &.{};
         node.votes = &.{};
@@ -228,6 +237,7 @@ pub const Node = struct {
             .message => |message| try node.step_message(message),
             .tick => node.step_tick(),
             .propose => |data| try node.step_propose(data),
+            .conf_change => |target| try reconfigure.step_conf_change(node, target),
             .snapshot_saved => |index| {
                 try snapshot_module.saved(node, index);
                 // ADR-009: the driver asserts a save's Effects empty. A due owed now (applied
@@ -237,6 +247,7 @@ pub const Node = struct {
             },
         }
         commit_module.apply_ready(node); // After every send, before any `leader_changed`.
+        reconfigure.step_end(node); // A removed leader steps down once the change committed.
         snapshot_module.emit_due(node); // Last: the snapshot phase follows notify.
 
         assert(node.effects_len <= node.effects.len);
@@ -255,7 +266,14 @@ pub const Node = struct {
             .applied_index = node.applied_index,
             .last_index = node.log.last_index(),
             .snapshot_index = node.snapshot_index,
+            .configuration_index = node.configuration_index,
         };
+    }
+
+    /// The configuration in force (it takes effect on append); borrowed until the next step.
+    pub fn configuration_current(node: *const Node) Configuration {
+        assert(node.configuration.voters.len > 0);
+        return node.configuration;
     }
 
     /// Borrowed until the next `step()`.
@@ -277,6 +295,7 @@ pub const Node = struct {
         try node_init.check_invariants_election(node);
         try node_init.check_invariants_bytes(node);
         try leader_module.check_invariants(node);
+        try reconfigure.check_invariants(node);
     }
 
     fn step_message(node: *Node, message: *const Message) StepError!void {
@@ -286,6 +305,9 @@ pub const Node = struct {
         assert(head.from != node.config.id); // `validate` rejected `from == to`.
         assert(head.term != .zero);
 
+        if (message.* == .append_entries) {
+            try reconfigure.receive_check(&node.config, message.append_entries.entries);
+        }
         node.effects_len = 0;
         const member = node_init.is_member(node, head.from);
         switch (message.*) {
@@ -340,7 +362,7 @@ pub const Node = struct {
         const leader_before = if (bumped) node.term_adopt(head.term) else NodeId.none;
         const last = node.log.last_index();
         const free = node.vote == .none or node.vote == head.from;
-        const grant = free and election.log_up_to_date(
+        const grant = free and reconfigure.self_is_voter(node) and election.log_up_to_date(
             last,
             node.log.last_term(),
             request.last_log_index,
@@ -380,6 +402,7 @@ pub const Node = struct {
         assert(head.from != node.config.id);
         assert(node.effects_len == 0);
         if (!member or !node_init.is_voter(node, head.from)) return;
+        if (!reconfigure.self_is_voter(node)) return; // A learner or outsider never answers.
 
         const last = node.log.last_index();
         const heard = node.role == .leader or
@@ -450,7 +473,10 @@ pub const Node = struct {
         node.effects_len = 0;
         node.election_elapsed +|= 1;
         assert(node.election_timeout >= node.config.election_ticks);
-        if (node.role == .leader) return leader_module.tick(node);
+        if (node.role == .leader) {
+            if (reconfigure.leave_if_due(node)) commit_module.advance_leader(node);
+            return leader_module.tick(node);
+        }
         if (node.election_elapsed < node.election_timeout) return;
         const configuration = &node.configuration;
         const voter = election.is_voter(
@@ -591,11 +617,14 @@ pub const Node = struct {
             node.emit(.{ .append = node.log.entries[count_before..count_after] });
         }
         leader_module.start(node, last_before);
-        // A lone voter commits its own entry at once; with peers this is a no-op, so no send
-        // precedes the `save_hard_state` it may emit.
+        // A lone voter commits its own entry at once (a no-op with voter peers), ahead of every
+        // send, so no send precedes the `save_hard_state` it may emit.
         const commit_before = node.commit_index;
         commit_module.advance_leader(node);
-        if (node.commit_index != commit_before) assert(node.progress_len == 0);
+        if (node.commit_index != commit_before) {
+            assert(node.progress_len == node.configuration.learners.len);
+        }
+        leader_module.send_all(node);
         node.emit(.{ .leader_changed = node.config.id });
 
         assert(node.role == .leader);
@@ -715,6 +744,7 @@ const leader_module = @import("leader.zig");
 const log_module = @import("../log.zig");
 const membership = @import("membership.zig");
 const node_init = @import("node_init.zig");
+const reconfigure = @import("reconfigure.zig");
 const snapshot_module = @import("snapshot.zig");
 const types = @import("../types.zig");
 

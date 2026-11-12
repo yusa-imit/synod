@@ -29,8 +29,10 @@
 //! `Rounds.id_next`, which only grows (a stale id from an earlier leadership never matches).
 //!
 //! Invariants: `progress_len` is zero unless the node leads and then equals the number of
-//! distinct voters other than the leader, in `configuration.voters` order followed by the
-//! outgoing-only voters; learners get nothing. `check_invariants` states them.
+//! distinct nodes other than the leader (`peers[slot]` names the node of `progress[slot]`): the
+//! voters, the outgoing-only voters, then the learners, which replicate but never count toward a
+//! quorum. `reconfigure.zig` keeps the slots in step with the configuration.
+//! `check_invariants` states them.
 //!
 //! Allocation: `Storage.init` allocates the worst case once, called from `Node.init`; every
 //! other function here takes no allocator. Cost sketch: a send touches one `Progress` (32
@@ -64,6 +66,8 @@ pub const Rounds = struct {
 /// The allocations of a leader, made once in `Node.init`.
 pub const Storage = struct {
     progress: []Progress,
+    /// Slot to peer id: `peers[slot]` is the node `progress[slot]` tracks.
+    peers: []NodeId,
     rounds: Rounds,
 
     /// Allocates the worst case for `config`: a `Progress` per possible peer and
@@ -77,13 +81,18 @@ pub const Storage = struct {
         const progress = try gpa.alloc(Progress, progress_count);
         errdefer gpa.free(progress);
 
+        const peers = try gpa.alloc(NodeId, progress_count);
+        errdefer gpa.free(peers);
+
         const records = try gpa.alloc(Round, records_count);
         errdefer gpa.free(records);
 
         @memset(progress, Progress.init(.zero, config.inflight_max));
+        @memset(peers, .none);
         @memset(records, Round.empty);
         return .{
             .progress = progress,
+            .peers = peers,
             .rounds = .{ .records = records, .id_next = 1, .ticks = 0 },
         };
     }
@@ -93,15 +102,16 @@ pub const Storage = struct {
         assert(storage.progress.len > 0);
         assert(storage.rounds.records.len >= storage.progress.len);
         gpa.free(storage.rounds.records);
+        gpa.free(storage.peers);
         gpa.free(storage.progress);
     }
 };
 
-/// A new leader's first act: one probing `Progress` per other voter, next to the entry after
-/// the pre-election log tail `last_before` (the term's empty entry is its first send), then the
-/// first `append_entries` to each. Preconditions: the node just became leader and has no
-/// progress; the effects so far are at most `save_hard_state` (a lone voter) and the empty
-/// entry's `append`.
+/// A new leader's first act: one probing `Progress` per peer, next to the entry after the
+/// pre-election log tail `last_before` (the term's empty entry is its first send). The caller
+/// then commits (a lone voter) and calls `send_all`, so no send precedes a `save_hard_state`.
+/// Preconditions: the node just became leader and has no progress; the effects so far are at
+/// most `save_hard_state` and the empty entry's `append`.
 pub fn start(node: *Node, last_before: Index) void {
     assert(node.role == .leader);
     assert(node.progress_len == 0);
@@ -112,12 +122,12 @@ pub fn start(node: *Node, last_before: Index) void {
     assert(peers <= node.progress.len);
     const fresh = Progress.init(last_before, node.config.inflight_max);
     @memset(node.progress[0..peers], fresh);
+    peers_fill(node);
     node.progress_len = peers;
     node.rounds.ticks = 0;
-    send_all(node);
 
     // The winning step also needs one slot for `leader_changed` (ADR-007 effect capacity).
-    assert(node.effects_len <= 2 + peers);
+    assert(node.effects_len <= 2);
     assert(node.effects_len < node.effects.len);
 }
 
@@ -136,19 +146,30 @@ pub fn send_all(node: *Node) void {
     assert(node.role == .leader);
     assert(node.progress_len <= node.progress.len);
 
-    var slot: u32 = 0;
+    for (0..node.progress_len) |slot| send_slot(node, @intCast(slot), node.peers[slot]);
+    assert(node.progress_len == peers_count(node));
+}
+
+/// Writes the canonical peer order into `peers`: voters, outgoing-only voters, learners.
+fn peers_fill(node: *Node) void {
     const sets = &node.configuration;
+    var slot: u32 = 0;
     for (sets.voters) |peer| {
         if (peer == node.config.id) continue;
-        send_slot(node, slot, peer);
+        node.peers[slot] = peer;
         slot += 1;
     }
     for (sets.voters_outgoing) |peer| {
         if (!is_outgoing_peer(node, peer)) continue;
-        send_slot(node, slot, peer);
+        node.peers[slot] = peer;
         slot += 1;
     }
-    assert(slot == node.progress_len);
+    for (sets.learners) |peer| {
+        if (!is_learner_peer(node, peer)) continue;
+        node.peers[slot] = peer;
+        slot += 1;
+    }
+    assert(slot == peers_count(node));
 }
 
 /// Handles one `append_entries_response`. Preconditions: the node leads and the response is at
@@ -173,7 +194,7 @@ pub fn step_response(node: *Node, reply: *const AppendResponse) void {
             remove_record(node, slot, at);
             // A new match may complete a quorum: persist the commit before the next send.
             if (p.on_accepted(matched)) commit_module.advance_leader(node);
-            if (p.next.order(node.log.last_index()) != .gt) send_slot(node, slot, peer);
+            send_if_behind(node, peer); // The commit may have removed the peer (a leave).
         },
         .rejected => |conflict| if (p.on_rejected(conflict, round.prev)) {
             send_slot(node, slot, peer); // The window is gone, so every record is dead.
@@ -183,7 +204,7 @@ pub fn step_response(node: *Node, reply: *const AppendResponse) void {
         },
     }
     assert(p.inflight_count <= p.inflight_max);
-    assert(node.effects_len <= 2); // At most `save_hard_state` and one send.
+    assert(node.effects_len <= 4); // `save_hard_state`, `append` (leave), one send.
 }
 
 /// Handles one `install_snapshot_response`. Preconditions: the node leads and the response is at
@@ -200,30 +221,32 @@ pub fn step_snapshot_response(node: *Node, reply: *const SnapshotResponse) void 
 
     node.rounds.records[records_base(node, slot)] = Round.empty; // The install's record.
     commit_module.advance_leader(node); // A new match may complete a quorum.
-    if (p.next.order(node.log.last_index()) != .gt) send_slot(node, slot, peer);
+    send_if_behind(node, peer);
     // The ack resumed the peer at `match + 1`. It is back in `.snapshot` only when the log was
     // compacted past that point meanwhile: then a newer snapshot (above `match`) is in flight.
-    if (p.state == .snapshot) assert(@intFromEnum(p.next) > @intFromEnum(p.match) + 1);
-    assert(node.effects_len <= 2); // At most `save_hard_state` and one send.
+    if (slot_of(node, peer)) |now| {
+        const q = &node.progress[now];
+        if (q.state == .snapshot) assert(@intFromEnum(q.next) > @intFromEnum(q.match) + 1);
+    }
+    assert(node.effects_len <= 4); // `save_hard_state`, `append` (leave), one send.
 }
 
-/// The progress slot of `peer`, in `send_all` order, or null for a learner or a stranger.
+/// Sends `peer` the entries it lacks, if it still has a slot (a commit may have removed it).
+fn send_if_behind(node: *Node, peer: NodeId) void {
+    assert(peer != node.config.id);
+    assert(node.role == .leader);
+    const slot = slot_of(node, peer) orelse return;
+    if (node.progress[slot].next.order(node.log.last_index()) != .gt) send_slot(node, slot, peer);
+}
+
+/// The progress slot of `peer`, or null for a stranger.
 pub fn slot_of(node: *const Node, peer: NodeId) ?u32 {
     assert(peer != node.config.id);
     assert(node.progress_len <= node.progress.len);
 
-    var slot: u32 = 0;
-    for (node.configuration.voters) |voter| {
-        if (voter == node.config.id) continue;
-        if (voter == peer) return slot;
-        slot += 1;
+    for (node.peers[0..node.progress_len], 0..) |held, slot| {
+        if (held == peer) return @intCast(slot);
     }
-    for (node.configuration.voters_outgoing) |voter| {
-        if (!is_outgoing_peer(node, voter)) continue;
-        if (voter == peer) return slot;
-        slot += 1;
-    }
-    assert(slot == node.progress_len);
     return null;
 }
 
@@ -257,12 +280,12 @@ fn remove_record(node: *Node, slot: u32, at: u32) void {
 /// is zero.
 pub fn tick(node: *Node) void {
     assert(node.role == .leader);
-    assert(node.effects_len == 0);
+    assert(node.effects_len <= 2); // A due `leave_joint` and its commit.
 
     node.rounds.ticks += 1;
     for (0..node.progress_len) |slot| round_expire(node, @intCast(slot));
     if (@mod(node.rounds.ticks, node.config.heartbeat_ticks) == 0) send_all(node);
-    assert(node.effects_len <= node.progress_len);
+    assert(node.effects_len <= node.progress_len + 2);
 }
 
 /// Returns the first violated leader invariant: progress held off the leader or not one slot
@@ -279,6 +302,9 @@ pub fn check_invariants(node: *const Node) InvariantError!void {
         return;
     }
     if (node.progress_len != peers_count(node)) return error.InvariantLeaderRole;
+    for (node.peers[0..node.progress_len]) |peer| {
+        if (peer == .none or slot_of(node, peer) == null) return error.InvariantLeaderRole;
+    }
     if (node.rounds.id_next == 0) return error.InvariantInflightOverflow;
     for (node.progress[0..node.progress_len], 0..) |*p, slot| {
         try p.check_invariants();
@@ -373,21 +399,11 @@ fn round_expire(node: *Node, slot: u32) void {
     if (was_snapshot) send_slot(node, slot, peer_of(node, slot));
 }
 
-/// The peer of progress `slot`, in `send_all` order. Precondition: `slot < progress_len`.
+/// The peer of progress `slot`. Precondition: `slot < progress_len`.
 fn peer_of(node: *const Node, slot: u32) NodeId {
     assert(slot < node.progress_len);
-    var next: u32 = 0;
-    for (node.configuration.voters) |voter| {
-        if (voter == node.config.id) continue;
-        if (next == slot) return voter;
-        next += 1;
-    }
-    for (node.configuration.voters_outgoing) |voter| {
-        if (!is_outgoing_peer(node, voter)) continue;
-        if (next == slot) return voter;
-        next += 1;
-    }
-    unreachable; // `progress_len == peers_count` (`check_invariants`), so every slot has a peer.
+    assert(node.peers[slot] != .none);
+    return node.peers[slot];
 }
 
 /// The index in `Rounds.records` of `slot`'s first record.
@@ -398,15 +414,24 @@ pub fn records_base(node: *const Node, slot: u32) usize {
     return base;
 }
 
-/// How many distinct voters other than this node the configuration has, in both sets.
-fn peers_count(node: *const Node) u32 {
+/// How many distinct nodes other than this one the configuration has, learners included.
+pub fn peers_count(node: *const Node) u32 {
     const sets = &node.configuration;
     var count: u32 = 0;
     for (sets.voters) |peer| count += @intFromBool(peer != node.config.id);
     for (sets.voters_outgoing) |peer| count += @intFromBool(is_outgoing_peer(node, peer));
-    assert(count <= sets.voters.len + sets.voters_outgoing.len);
+    for (sets.learners) |peer| count += @intFromBool(is_learner_peer(node, peer));
+    assert(count <= sets.voters.len + sets.voters_outgoing.len + sets.learners.len);
     assert(count <= node.progress.len);
     return count;
+}
+
+/// Whether a learner is a peer not already counted as a voter.
+fn is_learner_peer(node: *const Node, peer: NodeId) bool {
+    assert(peer != .none);
+    if (peer == node.config.id) return false;
+    const sets = &node.configuration;
+    return !election.contains(sets.voters, peer) and !election.contains(sets.voters_outgoing, peer);
 }
 
 /// Whether an outgoing-set voter is a peer not already counted in the incoming set.

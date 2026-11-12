@@ -49,11 +49,39 @@ pub fn effects_capacity(config: *const Config) u32 {
     return result;
 }
 
-/// `Progress` slots: one per distinct voter of a joint configuration, `2 * voters_max`.
+/// `Progress` slots, one per peer: every distinct voter of a joint configuration and every
+/// learner, but this node, `2 * voters_max + learners_max - 1`.
 pub fn progress_capacity(config: *const Config) u32 {
-    const result = 2 * config.voters_max;
-    assert(result >= 2);
+    const result = 2 * config.voters_max + config.learners_max - 1;
+    assert(result >= 1);
     return result;
+}
+
+/// The first two of the three equal regions of `members`: the current and the base
+/// configuration's ids (the third is scratch, see `reconfigure.zig`).
+pub fn members_split(members: []NodeId, config: *const Config) [2][]NodeId {
+    const size = members_region(config);
+    assert(members.len == members_capacity(config));
+    assert(size > 0);
+    return .{ members[0..size], members[size .. 2 * size] };
+}
+
+/// Zeroes the arrays `Node.init` allocated: the log slots, entry bytes, member and vote regions
+/// and the effect slots.
+pub fn storage_clear(
+    entries: []Entry,
+    bytes: []u8,
+    members: []NodeId,
+    votes: []NodeId,
+    effects: []Effect,
+) void {
+    assert(entries.len > 0);
+    assert(effects.len > 0);
+    @memset(entries, .{ .index = .zero, .term = .zero, .kind = .normal, .data = "" });
+    @memset(bytes, 0);
+    @memset(members, .none);
+    @memset(votes, .none);
+    @memset(effects, .{ .leader_changed = .none });
 }
 
 /// Round records: `inflight_max` per progress slot (the window is the bound on live rounds).
@@ -71,9 +99,17 @@ pub fn votes_capacity(config: *const Config) u32 {
     return result;
 }
 
-pub fn members_capacity(config: *const Config) u32 {
+/// Ids of one configuration region: `2 * voters_max + learners_max`.
+pub fn members_region(config: *const Config) u32 {
     const result = 2 * config.voters_max + config.learners_max;
     assert(result >= 2);
+    return result;
+}
+
+/// Three regions: the current configuration, the base one and a scratch one (`reconfigure.zig`).
+pub fn members_capacity(config: *const Config) u32 {
+    const result = 3 * members_region(config);
+    assert(result >= 6);
     return result;
 }
 
@@ -101,6 +137,7 @@ pub fn init_bytes_max(config: *const Config) u64 {
         alloc_bytes_max(NodeId, members_capacity(config)) +
         alloc_bytes_max(NodeId, votes_capacity(config)) +
         alloc_bytes_max(Effect, effects_capacity(config)) +
+        alloc_bytes_max(NodeId, progress_capacity(config)) +
         alloc_bytes_max(Progress, progress_capacity(config)) +
         alloc_bytes_max(leader_module.Round, rounds_capacity(config));
     assert(result >= config.log_bytes_max);
@@ -134,6 +171,7 @@ pub fn restore_validate(config: *const Config, restore: *const Restore) InitErro
     }
     var previous_term: Term = base.term;
     for (restore.entries, 1..) |entry, offset| {
+        if (entry.kind == .conf_change) try reconfigure.entry_check(config, entry.data);
         if (@intFromEnum(entry.index) != @intFromEnum(base.index) + offset) {
             return error.RestoreInconsistent;
         }
@@ -236,6 +274,7 @@ pub fn log_append(
     node.bytes_used += @intCast(data.len);
     assert(node.bytes_used <= node.bytes.len);
     assert(node.log.entries[node.log.count - 1].data.ptr == stored.ptr);
+    if (kind == .conf_change) reconfigure.on_append(node); // Takes effect on append.
 }
 
 pub fn check_invariants_indices(node: *const Node) InvariantError!void {
@@ -289,6 +328,7 @@ const election = @import("election.zig");
 const interfaces = @import("../interfaces.zig");
 const leader_module = @import("leader.zig");
 const node_module = @import("node.zig");
+const reconfigure = @import("reconfigure.zig");
 const types = @import("../types.zig");
 
 const Config = node_module.Config;
