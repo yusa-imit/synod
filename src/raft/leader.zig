@@ -107,11 +107,11 @@ pub const Storage = struct {
     }
 };
 
-/// A new leader's first act: one probing `Progress` per other voter, next to the entry after
-/// the pre-election log tail `last_before` (the term's empty entry is its first send), then the
-/// first `append_entries` to each. Preconditions: the node just became leader and has no
-/// progress; the effects so far are at most `save_hard_state` (a lone voter) and the empty
-/// entry's `append`.
+/// A new leader's first act: one probing `Progress` per peer, next to the entry after the
+/// pre-election log tail `last_before` (the term's empty entry is its first send). The caller
+/// then commits (a lone voter) and calls `send_all`, so no send precedes a `save_hard_state`.
+/// Preconditions: the node just became leader and has no progress; the effects so far are at
+/// most `save_hard_state` and the empty entry's `append`.
 pub fn start(node: *Node, last_before: Index) void {
     assert(node.role == .leader);
     assert(node.progress_len == 0);
@@ -125,10 +125,9 @@ pub fn start(node: *Node, last_before: Index) void {
     peers_fill(node);
     node.progress_len = peers;
     node.rounds.ticks = 0;
-    send_all(node);
 
     // The winning step also needs one slot for `leader_changed` (ADR-007 effect capacity).
-    assert(node.effects_len <= 2 + peers);
+    assert(node.effects_len <= 2);
     assert(node.effects_len < node.effects.len);
 }
 

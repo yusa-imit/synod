@@ -654,17 +654,17 @@ test "leader: a single-voter cluster leads, proposes and ticks without sending a
     for (0..30) |_| try testing.expectEqual(@as(usize, 0), (try tick(&rig)).items.len);
 }
 
-test "leader: a learner gets no progress tracker and no append_entries" {
+test "leader: a learner gets a progress tracker and a first append (ADR-009), never a vote" {
     var rig: Rig = undefined;
     try rig.init_fixed(testing.allocator, config, &with_learner, low);
     defer rig.deinit(testing.allocator);
 
     var buffer: [4]AppendRequest = undefined;
-    try expect_targets(try appends(try elect(&rig, 3), &buffer), &.{ 2, 3 });
-    try replicate_all(&rig, 2, 1, 2);
-    try expect_targets(try appends(try propose(&rig, "x"), &buffer), &.{ 2, 3 });
+    try expect_targets(try appends(try elect(&rig, 3), &buffer), &.{ 2, 3, 4 });
+    try replicate_all(&rig, 3, 1, 2); // Voters 2 and 3 and the learner 4.
+    try expect_targets(try appends(try propose(&rig, "x"), &buffer), &.{ 2, 3, 4 });
     for (0..3) |_| _ = try tick(&rig);
-    try testing.expectEqual(@as(usize, 2), fixtures.leader_progress(&rig.node).len);
+    try testing.expectEqual(@as(usize, 3), fixtures.leader_progress(&rig.node).len);
 }
 
 // ---- proposals that fail --------------------------------------------------------------------

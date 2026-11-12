@@ -202,7 +202,7 @@ const Snap = struct {
     status: node_module.Status,
     count: usize,
     live: usize,
-    slots: [2]Progress,
+    slots: [3]Progress,
     records: [8]Round,
     id_next: u64,
     ticks: u64,
@@ -214,7 +214,7 @@ fn snap(rig: *Rig) Snap {
     result.status = rig.node.status();
     result.count = rig.node.entries().len;
     result.live = live.len;
-    result.slots = .{ Progress.init(.zero, 1), Progress.init(.zero, 1) };
+    result.slots = .{Progress.init(.zero, 1)} ** 3;
     for (live, 0..) |slot, i| result.slots[i] = slot;
     @memset(&result.records, Round.empty);
     const records = rig.node.rounds.records;

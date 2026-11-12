@@ -150,13 +150,8 @@ pub const Node = struct {
         const leader_storage = try leader_module.Storage.init(gpa, &config);
         errdefer leader_storage.deinit(gpa);
 
-        @memset(log.entries, .{ .index = .zero, .term = .zero, .kind = .normal, .data = "" });
-        @memset(bytes, 0);
-        @memset(members, .none);
-        @memset(votes, .none);
-        @memset(effects, .{ .leader_changed = .none });
-        const size = node_init.members_region(&config);
-        const region = .{ members[0..size], members[size .. 2 * size] };
+        node_init.storage_clear(log.entries, bytes, members, votes, effects);
+        const region = node_init.members_split(members, &config);
         node.* = .{
             .config = config,
             .role = .follower,
@@ -622,11 +617,14 @@ pub const Node = struct {
             node.emit(.{ .append = node.log.entries[count_before..count_after] });
         }
         leader_module.start(node, last_before);
-        // A lone voter commits its own entry at once; with peers this is a no-op, so no send
-        // precedes the `save_hard_state` it may emit.
+        // A lone voter commits its own entry at once (a no-op with voter peers), ahead of every
+        // send, so no send precedes the `save_hard_state` it may emit.
         const commit_before = node.commit_index;
         commit_module.advance_leader(node);
-        if (node.commit_index != commit_before) assert(node.progress_len == 0);
+        if (node.commit_index != commit_before) {
+            assert(node.progress_len == node.configuration.learners.len);
+        }
+        leader_module.send_all(node);
         node.emit(.{ .leader_changed = node.config.id });
 
         assert(node.role == .leader);

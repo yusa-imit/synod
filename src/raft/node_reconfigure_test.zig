@@ -67,6 +67,8 @@ fn leader3(rig: *Rig, node_config: Config) !void {
     try start(rig, node_config, &fresh3);
     const won = try elect_checked(rig, &.{2});
     _ = try accept(rig, try append_to(won, 2));
+    // Peer 3's probe is still in flight; answer it so both peers replicate (nothing commits).
+    _ = try accept(rig, try append_to(won, 3));
     try testing.expectEqual(idx(1), rig.node.status().commit_index);
 }
 
@@ -590,12 +592,17 @@ fn run_model(seed: u64) !void {
         var saved: [32]node_module.Effect = undefined;
         @memcpy(saved[0..live.items.len], live.items);
         const effects: Effects = .{ .items = saved[0..live.items.len] };
+        // A lone voter changing to itself alone is both quorums: `enter_joint` commits at once
+        // and `leave_joint` follows in the same step (ADR-007: a lone voter commits at once).
+        const lone = model_len == 1 and target.voters.len == 1 and target.voters[0] == node_id(1);
+        const outgoing: []const NodeId = if (lone) &.{} else model_voters[0..model_len];
         try expect_configuration(
-            conf_of(target.voters, model_voters[0..model_len], target.learners),
+            conf_of(target.voters, outgoing, target.learners),
             rig.node.configuration_current(),
         );
-        try testing.expectEqual(idx(last + 1), rig.node.status().configuration_index);
-        try expect_refused(&rig, &target, error.ConfChangePending);
+        const adopted = last + if (lone) @as(u64, 2) else 1;
+        try testing.expectEqual(idx(adopted), rig.node.status().configuration_index);
+        if (!lone) try expect_refused(&rig, &target, error.ConfChangePending);
 
         try answer(&rig, effects, &all_peers, &trace);
         try drive(&rig, &all_peers, 6, &trace);
@@ -620,7 +627,7 @@ fn run_model(seed: u64) !void {
 
 test "reconfigure model: 60 seeds of random changes match the settled-target reference" {
     for (0..60) |seed| run_model(seed) catch |err| {
-        std.debug.print("reconfigure model failed at seed {d}\n", .{seed});
+        std.log.err("reconfigure model failed at seed {d}", .{seed});
         return err;
     };
 }

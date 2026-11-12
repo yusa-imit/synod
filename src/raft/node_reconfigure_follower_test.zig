@@ -536,7 +536,7 @@ fn run_model(seed: u64) !void {
 
 test "follower model: 100 seeds of appends and truncations match a backward-rescan reference" {
     for (0..100) |seed| run_model(seed) catch |err| {
-        std.debug.print("follower reconfigure model failed at seed {d}\n", .{seed});
+        std.log.err("follower reconfigure model failed at seed {d}", .{seed});
         return err;
     };
 }

@@ -57,6 +57,33 @@ pub fn progress_capacity(config: *const Config) u32 {
     return result;
 }
 
+/// The first two of the three equal regions of `members`: the current and the base
+/// configuration's ids (the third is scratch, see `reconfigure.zig`).
+pub fn members_split(members: []NodeId, config: *const Config) [2][]NodeId {
+    const size = members_region(config);
+    assert(members.len == members_capacity(config));
+    assert(size > 0);
+    return .{ members[0..size], members[size .. 2 * size] };
+}
+
+/// Zeroes the arrays `Node.init` allocated: the log slots, entry bytes, member and vote regions
+/// and the effect slots.
+pub fn storage_clear(
+    entries: []Entry,
+    bytes: []u8,
+    members: []NodeId,
+    votes: []NodeId,
+    effects: []Effect,
+) void {
+    assert(entries.len > 0);
+    assert(effects.len > 0);
+    @memset(entries, .{ .index = .zero, .term = .zero, .kind = .normal, .data = "" });
+    @memset(bytes, 0);
+    @memset(members, .none);
+    @memset(votes, .none);
+    @memset(effects, .{ .leader_changed = .none });
+}
+
 /// Round records: `inflight_max` per progress slot (the window is the bound on live rounds).
 pub fn rounds_capacity(config: *const Config) usize {
     const result = @as(usize, progress_capacity(config)) * config.inflight_max;

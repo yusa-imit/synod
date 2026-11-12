@@ -1,5 +1,5 @@
-//! synod.raft.reconfigure — joint-consensus membership changes in the node (thesis §4.3; plan 005
-//! item 8, ADR-009), as free functions over a `*Node`. `Node` owns the state (`configuration`,
+//! synod.raft.reconfigure — joint-consensus membership changes in the node (thesis §4.3; plan
+//! 005 item 8, ADR-009), as free functions over a `*Node`. `Node` owns the state (`configuration`,
 //! `configuration_index`, `base_configuration`, the peer slots); this file owns the rules.
 //!
 //! A configuration takes effect when its `conf_change` entry is appended (leader, follower and
@@ -52,7 +52,7 @@ pub fn on_append(node: *Node) void {
     assert(tail.index == node.log.last_index());
 
     var ids: [membership.conf_ids_max]NodeId = undefined;
-    // `entry_check` ran at receive or restore, and the leader encodes its own entries.
+    // proof: `entry_check` ran at receive or restore, and the leader encodes its own entries.
     const change = membership.decode(tail.data, &ids) catch unreachable;
     node.configuration = node_init.members_copy(current_region(node), configuration_of(&change));
     node.configuration_index = tail.index;
@@ -79,12 +79,14 @@ pub fn rescan(node: *Node) void {
     if (found) |at| {
         var ids: [membership.conf_ids_max]NodeId = undefined;
         const item = &node.log.entries[at];
-        // Node-held entries were validated on receive or restore.
+        // proof: node-held entries were validated on receive or restore.
         const change = membership.decode(item.data, &ids) catch unreachable;
-        node.configuration = node_init.members_copy(current_region(node), configuration_of(&change));
+        const copied = node_init.members_copy(current_region(node), configuration_of(&change));
+        node.configuration = copied;
         node.configuration_index = item.index;
     } else {
-        node.configuration = node_init.members_copy(current_region(node), &node.base_configuration);
+        const copied = node_init.members_copy(current_region(node), &node.base_configuration);
+        node.configuration = copied;
         node.configuration_index = node.log.base.index;
     }
     assert(node.configuration.voters.len > 0);
@@ -98,7 +100,7 @@ pub fn configuration_at(node: *Node, index: Index) Configuration {
     assert(index.order(node.log.last_index()) != .gt);
     if (last_conf_at(node, index)) |at| {
         var ids: [membership.conf_ids_max]NodeId = undefined;
-        // Node-held entries were validated on receive or restore.
+        // proof: node-held entries were validated on receive or restore.
         const change = membership.decode(node.log.entries[at].data, &ids) catch unreachable;
         return node_init.members_copy(scratch_region(node), configuration_of(&change));
     }
@@ -115,8 +117,8 @@ pub fn on_compact(node: *Node, through: Index) void {
 }
 
 /// Leader only: once the joint configuration's entry has committed, appends `leave_joint`. A full
-/// log defers it to the next call (every leader tick). Returns whether it appended. Emits `append` (persist phase), so call it
-/// before any send of the step.
+/// log defers it to the next call (every leader tick). Returns whether it appended. Emits
+/// `append` (persist phase), so call it before any send of the step.
 pub fn leave_if_due(node: *Node) bool {
     assert(node.effects_len < node.effects.len);
     if (node.role != .leader) return false;
@@ -163,7 +165,8 @@ pub fn step_conf_change(node: *Node, target: *const Configuration) ConfChangeErr
     node.emit(.{ .append = node.log.entries[count_before..node.log.count] });
     commit_module.advance_leader(node); // A lone voter commits at once, ahead of any send.
     leader_module.send_all(node);
-    assert(node.configuration.voters_outgoing.len > 0);
+    // A lone voter commits `enter_joint` at once and `leave_joint` follows: one or two entries.
+    assert(node.log.count == count_before + 1 or node.log.count == count_before + 2);
     assert(node.effects_len >= 1);
 }
 
