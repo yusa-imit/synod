@@ -59,7 +59,7 @@ Every code item is one PR with a failing test first; `zig build test`, `zig fmt 
       with a majority of `voters` and, when joint, of `voters_outgoing`; legal transitions.
       *Failing test first:* a joint table where each side alone loses; codec round trip and a
       flipped byte; a seeded model against a brute-force subset count.
-- [ ] 8. **4B-ii Joint consensus in the node.** `Input.conf_change`, leader only, one in flight
+- [x] 8. **4B-ii Joint consensus in the node.** `Input.conf_change`, leader only, one in flight
       (`ConfChangePending`); a configuration takes effect on append, not commit (thesis §4.1),
       and rolls back on truncate; the leader proposes `leave_joint` once `enter_joint` commits
       and steps down if outside C_new; learners never vote. No single-server path (REALM.md).
