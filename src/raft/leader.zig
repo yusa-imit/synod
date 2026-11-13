@@ -193,8 +193,15 @@ pub fn step_response(node: *Node, reply: *const AppendResponse) void {
             assert(m < std.math.maxInt(u64)); // `last_sent` is a log index, far below the limit.
             remove_record(node, slot, at);
             // A new match may complete a quorum: persist the commit before the next send.
+            // The commit may append `leave_joint`, which swap-removes slots: `p` is dead after
+            // `advance_leader`, so it is never touched again; the slot is looked up afresh.
             if (p.on_accepted(matched)) commit_module.advance_leader(node);
-            send_if_behind(node, peer); // The commit may have removed the peer (a leave).
+            send_if_behind(node, peer); // Also skips a peer the leave removed.
+            if (slot_of(node, peer)) |now| {
+                assert(node.progress[now].inflight_count <= node.progress[now].inflight_max);
+            }
+            assert(node.effects_len <= effects_response_max);
+            return;
         },
         .rejected => |conflict| if (p.on_rejected(conflict, round.prev)) {
             send_slot(node, slot, peer); // The window is gone, so every record is dead.
@@ -203,9 +210,15 @@ pub fn step_response(node: *Node, reply: *const AppendResponse) void {
             p.on_stale_rejection();
         },
     }
+    // Only the rejected branch gets here, and it removes no slot: `p` is still live.
     assert(p.inflight_count <= p.inflight_max);
-    assert(node.effects_len <= 4); // `save_hard_state`, `append` (leave), one send.
+    assert(node.effects_len <= effects_response_max);
 }
+
+/// Most effects a response step holds when it returns to its caller: `save_hard_state` (the
+/// commit moved), `append` (`leave_joint`), one send (`append_entries` or `send_snapshot`), and
+/// one slack for a second `save_hard_state` should the leave commit within the same step.
+const effects_response_max: u32 = 4;
 
 /// Handles one `install_snapshot_response`. Preconditions: the node leads and the response is at
 /// our term. Only the ack of exactly the snapshot in flight counts (`Progress.on_snapshot_acked`,
@@ -228,7 +241,7 @@ pub fn step_snapshot_response(node: *Node, reply: *const SnapshotResponse) void 
         const q = &node.progress[now];
         if (q.state == .snapshot) assert(@intFromEnum(q.next) > @intFromEnum(q.match) + 1);
     }
-    assert(node.effects_len <= 4); // `save_hard_state`, `append` (leave), one send.
+    assert(node.effects_len <= effects_response_max);
 }
 
 /// Sends `peer` the entries it lacks, if it still has a slot (a commit may have removed it).

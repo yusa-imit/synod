@@ -116,9 +116,12 @@ pub fn on_compact(node: *Node, through: Index) void {
     assert(node.base_configuration.voters.len > 0);
 }
 
-/// Leader only: once the joint configuration's entry has committed, appends `leave_joint`. A full
-/// log defers it to the next call (every leader tick). Returns whether it appended. Emits
-/// `append` (persist phase), so call it before any send of the step.
+/// Leader only: once the joint configuration's entry has committed, appends `leave_joint`.
+/// Returns whether it appended. Emits `append` (persist phase), so call it before any send of
+/// the step. A full log is not an error: it returns false, nothing changes, and the leave stays
+/// due (the configuration is still joint and `configuration_index <= commit_index`). It is
+/// retried by every later call: each commit move (`commit.advance_leader`) and each leader tick
+/// (`node.zig`), so it lands once compaction frees a slot.
 pub fn leave_if_due(node: *Node) bool {
     assert(node.effects_len < node.effects.len);
     if (node.role != .leader) return false;
@@ -291,10 +294,13 @@ fn region_size(node: *const Node) usize {
     return node.members.len / 3;
 }
 
+/// The first third of `node.members`: storage for the configuration in force (`configuration`).
 pub fn current_region(node: *const Node) []NodeId {
     return node.members[0..region_size(node)];
 }
 
+/// The middle third of `node.members`: storage for `base_configuration`, the configuration as of
+/// the log base (what no log entry above the base overrides).
 pub fn base_region(node: *const Node) []NodeId {
     const size = region_size(node);
     return node.members[size .. 2 * size];

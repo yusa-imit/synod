@@ -133,7 +133,8 @@ pub const Status = struct {
     last_index: Index,
     /// The index of the last snapshot the driver confirmed; zero when none.
     snapshot_index: Index,
-    /// The index of the entry that set the current configuration; zero when it is the base one.
+    /// The index of the entry that set the current configuration; `log.base.index` when it is the
+    /// base one (zero until the log is first compacted).
     configuration_index: Index,
 };
 

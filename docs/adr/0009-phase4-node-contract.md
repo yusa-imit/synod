@@ -169,7 +169,9 @@ Decoding a node-held entry cannot fail (validated on receive or restore): assert
 `enter_joint` commits, the leader appends `leave_joint` (sent with each peer's next send); when
 `leave_joint` commits and it is not in `voters`, it steps down at step end (term kept,
 `leader_changed(.none)`, reads failed). A node not a voter in its own configuration never
-grants a vote or pre-vote, never campaigns, and its grants are never tallied. There is no
+grants a vote or pre-vote, never campaigns, and its grants are never tallied. This holds until
+it sees itself as a voter in its configuration (a new member refuses to vote or pre-vote while
+it is still a learner or has not yet received the entry that adds it). There is no
 single-server path. Internal `pub fn`s: `reconfigure.{on_append, on_truncate, on_compact,
 on_commit, step_conf_change}`; `snapshot.{emit_due, saved, compact, step_install,
 step_install_response, send}`; `read.{Storage, register, ack, fail_all, emit,
