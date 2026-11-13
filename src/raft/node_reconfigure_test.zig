@@ -51,6 +51,7 @@ const ids1 = [_]NodeId{node_id(1)};
 const ids3 = fixtures.voters;
 const ids4 = [_]NodeId{ node_id(1), node_id(2), node_id(3), node_id(4) };
 const ids5 = fixtures.voters5;
+const ids134 = [_]NodeId{ node_id(1), node_id(3), node_id(4) };
 const ids345 = [_]NodeId{ node_id(3), node_id(4), node_id(5) };
 const ids6 = [_]NodeId{ node_id(1), node_id(2), node_id(3), node_id(4), node_id(5), node_id(6) };
 const learner4 = [_]NodeId{node_id(4)};
@@ -328,6 +329,36 @@ test "reconfigure: survivors keep their progress and removed peers are never sen
     }
     try testing.expectEqual(@as(u32, 0), sends_to_removed);
     try testing.expect(resumed);
+}
+
+test "reconfigure: the ack that commits enter_joint may come from a peer the leave removes" {
+    var rig: Rig = undefined;
+    try leader5(&rig);
+    defer rig.deinit(testing.allocator);
+    // Voters 1, 3, 4: peers 2 and 5 are outgoing-only and sit after 3 and 4 in the slot order.
+    const target = conf_of(&ids134, &.{}, &.{});
+    const effects = try propose_change(&rig, &target);
+    _ = try accept_each(&rig, effects, &.{3}); // Incoming has 2 of 3; outgoing only 2 of 5.
+    try testing.expectEqual(idx(1), rig.node.status().commit_index);
+
+    // Peer 2's ack completes the outgoing majority; the leave drops 2 and 5 mid-response.
+    const committed = try accept_each(&rig, effects, &.{2});
+
+    try expect_conf_append(committed, 3, .{ .leave_joint = conf_of(&ids134, &.{}, &.{}) });
+    try testing.expectEqual(idx(2), rig.node.status().commit_index);
+    try testing.expectEqual(@as(usize, 2), fixtures.leader_progress(&rig.node).len);
+    for (committed.items) |effect| switch (effect) {
+        .send => |message| switch (message) {
+            .append_entries => |request| {
+                try testing.expect(request.header.to != node_id(2));
+                try testing.expect(request.header.to != node_id(5));
+            },
+            else => {},
+        },
+        else => {},
+    };
+    for (0..9) |_| _ = try step_checked(&rig, .tick); // Stale progress would trip the checks.
+    try testing.expectEqual(Role.leader, rig.node.status().role);
 }
 
 // ---- refusals ------------------------------------------------------------------------------

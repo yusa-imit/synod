@@ -7,6 +7,17 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Added
 
+- Joint consensus in the node (plan 005 item 8): `Input.conf_change` makes a leader append
+  `enter_joint(current, target)`; a configuration takes effect when its entry is appended and
+  is rolled back on truncation; once `enter_joint` commits the leader appends `leave_joint`
+  (deferred to the next commit move or tick when the log is full); a leader that is not a
+  voter of the settled configuration steps down. Elections, pre-votes and the commit rule use
+  both voter sets; learners replicate but never vote; a node that is not a voter never grants
+  a vote. Leader progress follows the configuration (survivors keep theirs, removed peers
+  lose their slots). Breaking: `Node.InitError` and `ReceiveError` gain
+  `membership.ConfDecodeError` members (an exhaustive `switch` must handle them) and
+  `Status` gains `configuration_index`. `docs/adr/0009-phase4-node-contract.md` has the
+  contract.
 - `raft/membership.zig` (plan 005 item 7): the `ConfChange` entry codec (`SYCC` magic, version,
   crc32; `encode`, `decode`, typed `ConfDecodeError`), `enter_joint`/`leave_joint` builders and
   the joint-aware `quorum_reached`/`quorum_index`. The election and commit paths now share its
@@ -219,7 +230,8 @@ All notable changes to this project are documented in this file. Format follows
   `check_invariants` (`InvariantProgressOrder`, `InvariantInflightOverflow`).
   `src/raft/progress_test.zig` covers it, including a seeded stream against a naive reference.
 - `src/raft/leader.zig` (plan 003 item 2B-i-a): the leader send side. A winner builds one
-  probing `Progress` per other voter (both sets of a joint configuration, no learners) and sends
+  probing `Progress` per other peer (both sets of a joint configuration, plus learners, which
+  replicate but never vote) and sends
   each an `append_entries` carrying the term's empty entry; `propose` and every
   `heartbeat_ticks`-th leader tick send to each peer whose window has room, batches capped by
   `message_limits.entries_max`. Each send is a recorded round (id, `prev`, `last_sent`, send
