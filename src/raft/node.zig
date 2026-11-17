@@ -52,6 +52,7 @@
 pub const Config = contract.Config;
 pub const Restore = contract.Restore;
 pub const Input = contract.Input;
+pub const Read = contract.Read;
 pub const SnapshotDue = contract.SnapshotDue;
 pub const SnapshotSend = contract.SnapshotSend;
 pub const Effect = contract.Effect;
@@ -62,6 +63,7 @@ pub const InitError = contract.InitError;
 pub const ReceiveError = contract.ReceiveError;
 pub const ProposeError = contract.ProposeError;
 pub const ConfChangeError = contract.ConfChangeError;
+pub const ReadIndexError = contract.ReadIndexError;
 pub const StepError = contract.StepError;
 pub const InvariantError = contract.InvariantError;
 
@@ -112,6 +114,8 @@ pub const Node = struct {
     peers: []NodeId,
     /// Leader only: the records of the rounds in flight, and the round and tick counters.
     rounds: leader_module.Rounds,
+    /// Leader only: the pending ReadIndex reads and their buffers (`read.zig`).
+    reads: read_module.Storage,
 
     /// Initializes `node` in place from `config`, `restore` and the injected `rng`, copying all
     /// of `restore`. The node starts a follower with `commit_index = max(hard_state.commit,
@@ -128,7 +132,6 @@ pub const Node = struct {
         rng: Rng,
     ) InitError!void {
         node_init.assert_config(&config);
-        assert(restore.entries.len < std.math.maxInt(u32));
         try node_init.restore_validate(&config, restore);
 
         var log: log_module.Log = undefined;
@@ -181,6 +184,7 @@ pub const Node = struct {
             .progress_len = 0,
             .peers = leader_storage.peers,
             .rounds = leader_storage.rounds,
+            .reads = leader_storage.reads,
         };
         node.log.reset(restore.snapshot);
         try node_init.restore_entries(node, restore);
@@ -206,6 +210,7 @@ pub const Node = struct {
         assert(node.effects.len > 0);
         assert(node.members.len > 0);
 
+        node.reads.deinit(gpa);
         gpa.free(node.rounds.records);
         gpa.free(node.peers);
         gpa.free(node.progress);
@@ -215,6 +220,7 @@ pub const Node = struct {
         gpa.free(node.bytes);
         node.log.deinit(gpa);
 
+        node.reads = read_module.Storage.empty;
         node.progress = &.{};
         node.peers = &.{};
         node.rounds.records = &.{};
@@ -238,6 +244,7 @@ pub const Node = struct {
             .tick => node.step_tick(),
             .propose => |data| try node.step_propose(data),
             .conf_change => |target| try reconfigure.step_conf_change(node, target),
+            .read_index => |ctx| try read_module.register(node, ctx),
             .snapshot_saved => |index| {
                 try snapshot_module.saved(node, index);
                 // ADR-009: the driver asserts a save's Effects empty. A due owed now (applied
@@ -248,6 +255,7 @@ pub const Node = struct {
         }
         commit_module.apply_ready(node); // After every send, before any `leader_changed`.
         reconfigure.step_end(node); // A removed leader steps down once the change committed.
+        read_module.emit(node); // After apply, so `applied >= index` holds at the driver.
         snapshot_module.emit_due(node); // Last: the snapshot phase follows notify.
 
         assert(node.effects_len <= node.effects.len);
@@ -267,6 +275,7 @@ pub const Node = struct {
             .last_index = node.log.last_index(),
             .snapshot_index = node.snapshot_index,
             .configuration_index = node.configuration_index,
+            .reads_pending = node.reads.len,
         };
     }
 
@@ -296,6 +305,7 @@ pub const Node = struct {
         try node_init.check_invariants_bytes(node);
         try leader_module.check_invariants(node);
         try reconfigure.check_invariants(node);
+        try read_module.check_invariants(node);
     }
 
     fn step_message(node: *Node, message: *const Message) StepError!void {
@@ -744,6 +754,7 @@ const leader_module = @import("leader.zig");
 const log_module = @import("../log.zig");
 const membership = @import("membership.zig");
 const node_init = @import("node_init.zig");
+const read_module = @import("read.zig");
 const reconfigure = @import("reconfigure.zig");
 const snapshot_module = @import("snapshot.zig");
 const types = @import("../types.zig");

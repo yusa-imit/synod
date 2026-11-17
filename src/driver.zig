@@ -71,6 +71,9 @@ pub const Driver = struct {
     last_tick_ms: u64,
     /// `snapshot_bytes_max` bytes the state machine snapshots into; owned, freed by `deinit`.
     snapshot_buffer: []u8,
+    /// `reads_max` slots: the reads that completed in the last call (`reads_done`); owned.
+    reads_done_buffer: []ReadDone,
+    reads_done_len: u32,
 
     /// `tick_ms` is the logical tick length; at most `ticks_per_poll_max` ticks run per `poll`.
     pub const Options = struct { tick_ms: u32, ticks_per_poll_max: u32 };
@@ -84,6 +87,8 @@ pub const Driver = struct {
     /// `LogStore.UpdateError` is a subset of `WriteError`.
     pub const Fault = LogStore.WriteError || LogStore.ReadError || StateMachine.ApplyError ||
         StateMachine.RestoreError || error{SnapshotTooLarge};
+    pub const ReadOutcome = enum(u8) { ready = 1, failed = 2 };
+    pub const ReadDone = struct { read: raft.Read, outcome: ReadOutcome };
     pub const InitError = raft.InitError || LogStore.ReadError || StateMachine.RestoreError;
 
     /// Restores the node from `deps.store` (hard state, snapshot if any, and the log above it),
@@ -134,6 +139,10 @@ pub const Driver = struct {
         driver.snapshot_buffer = try gpa.alloc(u8, buffer_len);
         errdefer gpa.free(driver.snapshot_buffer);
 
+        driver.reads_done_buffer = try gpa.alloc(ReadDone, config.reads_max);
+        errdefer gpa.free(driver.reads_done_buffer);
+        driver.reads_done_len = 0;
+
         // Last, so a refused restart never touches the state machine: the store and the node
         // have accepted the snapshot before the machine is told to load it.
         if (record) |found| {
@@ -158,12 +167,15 @@ pub const Driver = struct {
             @alignOf(types.Entry) - 1;
         assert(node_bytes > 0);
         assert(scratch_bytes >= config.log_entries_max);
-        return node_bytes + scratch_bytes + config.message_limits.snapshot_bytes_max;
+        const reads_bytes = @as(u64, config.reads_max) * @sizeOf(ReadDone) + @alignOf(ReadDone) - 1;
+        return node_bytes + scratch_bytes + config.message_limits.snapshot_bytes_max + reads_bytes;
     }
 
     pub fn deinit(driver: *Driver, io: Io, gpa: Allocator) void {
         _ = io;
         assert(driver.node.effects.len > 0);
+        gpa.free(driver.reads_done_buffer);
+        driver.reads_done_buffer = &.{};
         gpa.free(driver.snapshot_buffer);
         driver.snapshot_buffer = &.{};
         driver.node.deinit(gpa);
@@ -178,6 +190,7 @@ pub const Driver = struct {
     ) (raft.ReceiveError || Fault)!void {
         _ = io;
         assert(!driver.stopped);
+        driver.reads_done_len = 0;
         const effects = driver.node.step(.{ .message = message }) catch |err| {
             // A message input cannot produce a `Propose*` error, so the cast only narrows.
             return @errorCast(err);
@@ -195,12 +208,39 @@ pub const Driver = struct {
     ) (raft.ProposeError || Fault)!void {
         _ = io;
         assert(!driver.stopped);
+        driver.reads_done_len = 0;
         const effects = driver.node.step(.{ .propose = data }) catch |err| {
             // A propose input cannot produce a message error, so the cast only narrows.
             return @errorCast(err);
         };
         try driver.execute(effects);
         assert(!driver.stopped);
+    }
+
+    /// Registers a ReadIndex read (leader only) and executes the effects. The read completes in
+    /// a later call, visible through `reads_done` (`ready` or `failed`). Precondition: not
+    /// stopped. A refused read returns its error and records nothing.
+    pub fn read_index(
+        driver: *Driver,
+        io: Io,
+        ctx: u64,
+    ) (raft.ReadIndexError || Fault)!void {
+        _ = io;
+        assert(!driver.stopped);
+        driver.reads_done_len = 0;
+        const effects = driver.node.step(.{ .read_index = ctx }) catch |err| {
+            // A read input cannot produce a message, propose or conf-change error.
+            return @errorCast(err);
+        };
+        try driver.execute(effects);
+        assert(!driver.stopped);
+    }
+
+    /// The reads that completed in the last `receive`, `propose`, `poll` or `read_index` call,
+    /// in effect order; borrowed until the next such call.
+    pub fn reads_done(driver: *const Driver) []const ReadDone {
+        assert(driver.reads_done_len <= driver.reads_done_buffer.len);
+        return driver.reads_done_buffer[0..driver.reads_done_len];
     }
 
     /// Turns elapsed clock time into ticks and steps the node once per tick.
@@ -210,6 +250,7 @@ pub const Driver = struct {
         assert(!driver.stopped);
         const now_ms = driver.deps.clock.now_ms();
         assert(now_ms >= driver.last_tick_ms);
+        driver.reads_done_len = 0;
 
         const elapsed_ticks = @divFloor(now_ms - driver.last_tick_ms, driver.options.tick_ms);
         const run_count: u64 = @min(elapsed_ticks, driver.options.ticks_per_poll_max);
@@ -291,6 +332,18 @@ pub const Driver = struct {
         try driver.deps.state_machine.restore(&reader);
     }
 
+    /// Appends `reads` to `reads_done` with `outcome`. Never overflows: the node holds at most
+    /// `reads_max` reads and a call completes each read at most once (only `read_index` adds one).
+    fn reads_record(driver: *Driver, reads: []const raft.Read, outcome: ReadOutcome) void {
+        const buffer = driver.reads_done_buffer;
+        assert(driver.reads_done_len <= buffer.len);
+        assert(reads.len <= buffer.len - driver.reads_done_len);
+        for (reads) |read| {
+            buffer[driver.reads_done_len] = .{ .read = read, .outcome = outcome };
+            driver.reads_done_len += 1;
+        }
+    }
+
     /// Runs one step's effects in order. The persist phase sets `unsynced`; the first later
     /// effect of a send or apply phase is preceded by exactly one `sync`.
     fn execute(driver: *Driver, effects: Effects) Fault!void {
@@ -317,6 +370,8 @@ pub const Driver = struct {
                     for (entries) |*entry| try driver.deps.state_machine.apply(entry);
                 },
                 .leader_changed => {},
+                .read_ready => |reads| driver.reads_record(reads, .ready),
+                .read_failed => |reads| driver.reads_record(reads, .failed),
                 .save_snapshot => |*record| {
                     try store.save_snapshot(&record.snapshot, &record.configuration);
                 },
@@ -344,4 +399,5 @@ test {
     _ = @import("driver_init_bytes_test.zig");
     _ = @import("driver_snapshot_test.zig");
     _ = @import("driver_install_test.zig");
+    _ = @import("driver_read_test.zig");
 }

@@ -178,6 +178,7 @@ pub const Options = struct {
                 // snapshot_bytes_max` (see `sim_snapshots.compaction_on`).
                 .snapshot_entries_min = 0,
                 .snapshot_trailing = 0,
+                .reads_max = 8,
                 .message_limits = .{
                     .entries_max = 4,
                     .entry_bytes_max = workload_module.command_bytes,

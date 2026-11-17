@@ -69,6 +69,8 @@ pub const Storage = struct {
     /// Slot to peer id: `peers[slot]` is the node `progress[slot]` tracks.
     peers: []NodeId,
     rounds: Rounds,
+    /// The ReadIndex side (`read.zig`): pending reads and the per-slot acked rounds.
+    reads: read_module.Storage,
 
     /// Allocates the worst case for `config`: a `Progress` per possible peer and
     /// `inflight_max` rounds each. Precondition: a coherent `config` (`assert_config`).
@@ -87,6 +89,9 @@ pub const Storage = struct {
         const records = try gpa.alloc(Round, records_count);
         errdefer gpa.free(records);
 
+        const reads = try read_module.Storage.init(gpa, config);
+        errdefer reads.deinit(gpa);
+
         @memset(progress, Progress.init(.zero, config.inflight_max));
         @memset(peers, .none);
         @memset(records, Round.empty);
@@ -94,6 +99,7 @@ pub const Storage = struct {
             .progress = progress,
             .peers = peers,
             .rounds = .{ .records = records, .id_next = 1, .ticks = 0 },
+            .reads = reads,
         };
     }
 
@@ -101,6 +107,7 @@ pub const Storage = struct {
     pub fn deinit(storage: *const Storage, gpa: Allocator) void {
         assert(storage.progress.len > 0);
         assert(storage.rounds.records.len >= storage.progress.len);
+        storage.reads.deinit(gpa);
         gpa.free(storage.rounds.records);
         gpa.free(storage.peers);
         gpa.free(storage.progress);
@@ -125,6 +132,7 @@ pub fn start(node: *Node, last_before: Index) void {
     peers_fill(node);
     node.progress_len = peers;
     node.rounds.ticks = 0;
+    read_module.leader_start(node);
 
     // The winning step also needs one slot for `leader_changed` (ADR-007 effect capacity).
     assert(node.effects_len <= 2);
@@ -135,6 +143,7 @@ pub fn start(node: *Node, last_before: Index) void {
 pub fn reset(node: *Node) void {
     assert(node.role != .leader);
     assert(node.progress_len <= node.progress.len);
+    read_module.fail_all(node); // Every pending read fails with the leadership (ADR-009).
     node.progress_len = 0;
     assert(node.progress_len == 0);
 }
@@ -181,6 +190,9 @@ pub fn step_response(node: *Node, reply: *const AppendResponse) void {
 
     const peer = reply.header.from;
     const slot = slot_of(node, peer) orelse return;
+    // A response at our term proves the peer still follows us, whatever its outcome; a round
+    // never issued is peer data gone wrong and proves nothing (ReadIndex, `read.zig`).
+    if (reply.round < node.rounds.id_next) read_module.ack(node, slot, reply.round);
     const p = &node.progress[slot];
     if (p.state == .snapshot) return; // The one round in flight is an install, not an append.
     const at = live_record(node, slot, reply.round) orelse return;
@@ -464,6 +476,7 @@ const election = @import("election.zig");
 const node_init = @import("node_init.zig");
 const node_module = @import("node.zig");
 const progress_module = @import("progress.zig");
+const read_module = @import("read.zig");
 const snapshot_module = @import("snapshot.zig");
 const types = @import("../types.zig");
 

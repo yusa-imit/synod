@@ -32,6 +32,7 @@ pub fn assert_config(config: *const Config) void {
     assert(config.inflight_max > 0);
     assert(config.log_entries_max > 0);
     assert(config.snapshot_entries_min < config.log_entries_max);
+    assert(config.reads_max >= 1);
     if (config.snapshot_entries_min == 0) {
         assert(config.snapshot_trailing == 0); // Compaction off (see `Config`).
     } else {
@@ -132,6 +133,7 @@ pub fn init_bytes_max(config: *const Config) u64 {
     assert(config.learners_max <= types.learners_max);
     assert(config.inflight_max > 0);
     assert(config.log_entries_max > 0);
+    assert(config.reads_max >= 1);
     const result = alloc_bytes_max(Entry, config.log_entries_max) +
         alloc_bytes_max(u8, config.log_bytes_max) +
         alloc_bytes_max(NodeId, members_capacity(config)) +
@@ -139,7 +141,10 @@ pub fn init_bytes_max(config: *const Config) u64 {
         alloc_bytes_max(Effect, effects_capacity(config)) +
         alloc_bytes_max(NodeId, progress_capacity(config)) +
         alloc_bytes_max(Progress, progress_capacity(config)) +
-        alloc_bytes_max(leader_module.Round, rounds_capacity(config));
+        alloc_bytes_max(leader_module.Round, rounds_capacity(config)) +
+        alloc_bytes_max(read_module.Pending, config.reads_max) +
+        alloc_bytes_max(Read, 2 * @as(u64, config.reads_max)) +
+        alloc_bytes_max(u64, progress_capacity(config));
     assert(result >= config.log_bytes_max);
     assert(result >= @as(u64, config.log_entries_max) * @sizeOf(Entry));
     return result;
@@ -155,6 +160,7 @@ pub fn election_timeout_draw(rng: Rng, election_ticks: u32) u32 {
 
 /// Pure data check of `Restore`; allocates nothing. `RestoreLogFull` is decided at copy time.
 pub fn restore_validate(config: *const Config, restore: *const Restore) InitError!void {
+    assert(restore.entries.len < std.math.maxInt(u32));
     const configuration = &restore.configuration;
     try configuration.validate();
     if (configuration.voters.len > config.voters_max) return error.ConfVotersTooMany;
@@ -328,6 +334,7 @@ const election = @import("election.zig");
 const interfaces = @import("../interfaces.zig");
 const leader_module = @import("leader.zig");
 const node_module = @import("node.zig");
+const read_module = @import("read.zig");
 const reconfigure = @import("reconfigure.zig");
 const types = @import("../types.zig");
 
@@ -342,6 +349,7 @@ const InvariantError = node_module.InvariantError;
 const Node = node_module.Node;
 const NodeId = types.NodeId;
 const Progress = @import("progress.zig").Progress;
+const Read = node_module.Read;
 const Restore = node_module.Restore;
 const Rng = interfaces.Rng;
 const Term = types.Term;

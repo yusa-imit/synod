@@ -104,6 +104,7 @@ pub const config: Config = .{
     .log_bytes_max = 64,
     .snapshot_entries_min = 0, // Compaction off: fixture state machines cannot snapshot.
     .snapshot_trailing = 0,
+    .reads_max = 4,
     .message_limits = .{ .entries_max = 4, .entry_bytes_max = 32, .snapshot_bytes_max = 128 },
 };
 

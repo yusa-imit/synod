@@ -41,6 +41,7 @@ fn quiet_status(term_value: u64, vote: u64) Status {
         .last_index = idx(3),
         .snapshot_index = .zero,
         .configuration_index = .zero,
+        .reads_pending = 0,
     };
 }
 
@@ -73,6 +74,8 @@ test "node: Effect.phase maps every variant to its ADR-007 phase" {
             .snapshot = .{ .index = idx(1), .term = term(1) },
         } }, .phase = .send },
         .{ .effect = .{ .restore = idx(1) }, .phase = .apply },
+        .{ .effect = .{ .read_ready = &.{} }, .phase = .notify },
+        .{ .effect = .{ .read_failed = &.{} }, .phase = .notify },
     };
     try testing.expectEqual(@typeInfo(Effect).@"union".fields.len, cases.len);
     for (cases) |case| try testing.expectEqual(case.phase, case.effect.phase());
@@ -400,6 +403,7 @@ fn describe_step_error(err: node_module.StepError) u8 {
         error.ConfChangeTooLarge,
         error.ConfChangeLogFull,
         => 4,
+        error.ReadIndexNotLeader, error.ReadIndexNotReady, error.ReadIndexFull => 5,
     };
 }
 

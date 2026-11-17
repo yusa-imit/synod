@@ -34,6 +34,8 @@ pub const Config = struct {
     /// Entries kept at or below a saved snapshot for slightly lagging peers; below
     /// `snapshot_entries_min` (zero when compaction is off).
     snapshot_trailing: u32,
+    /// Most ReadIndex reads pending at once (ADR-009 "ReadIndex"); at least one.
+    reads_max: u32,
     /// Validates every received `Message` and bounds every batch.
     message_limits: Message.Limits,
 };
@@ -59,8 +61,16 @@ pub const Input = union(enum) {
     /// The target configuration (voters and learners, settled), borrowed until `step` returns.
     /// The leader builds `enter_joint(current, target)` and appends it (ADR-009). Leader only.
     conf_change: *const Configuration,
+    /// A linearizable read request; `ctx` is echoed in `Read`. Leader only (ADR-009).
+    read_index: u64,
     /// The driver saved and synced the pending `snapshot_due` at this index. Emits nothing.
     snapshot_saved: Index,
+};
+
+/// One ReadIndex read: the caller's `ctx` and the commit index it must see applied (ADR-009).
+pub const Read = struct {
+    ctx: u64,
+    index: Index,
 };
 
 /// A snapshot the leader asks the driver to send (ADR-009 "InstallSnapshot"): the driver reads
@@ -90,6 +100,10 @@ pub const Effect = union(enum) {
     apply: []const Entry,
     /// `.none` means unknown. Informational.
     leader_changed: NodeId,
+    /// Notify phase. Reads confirmed by a quorum, a FIFO prefix; borrowed from the node.
+    read_ready: []const Read,
+    /// Notify phase. Reads failed by a step-down; borrowed from the node.
+    read_failed: []const Read,
     /// Snapshot phase: at most one per step, always the last effect.
     snapshot_due: SnapshotDue,
     /// Persist phase. An installed snapshot; `snapshot.data` borrows `Input.message`.
@@ -109,7 +123,7 @@ pub const Effect = union(enum) {
             .truncate, .append, .save_hard_state, .save_snapshot => .persist,
             .send, .send_snapshot => .send,
             .apply, .restore => .apply,
-            .leader_changed => .notify,
+            .leader_changed, .read_ready, .read_failed => .notify,
             .snapshot_due => .snapshot,
         };
         assert(@intFromEnum(result) >= @intFromEnum(Phase.persist));
@@ -136,6 +150,8 @@ pub const Status = struct {
     /// The index of the entry that set the current configuration; `log.base.index` when it is the
     /// base one (zero until the log is first compacted).
     configuration_index: Index,
+    /// Reads registered and neither ready nor failed yet.
+    reads_pending: u32,
 };
 
 pub const InitError = Allocator.Error || ConfError || membership.ConfDecodeError ||
@@ -149,7 +165,8 @@ pub const ConfChangeError = ConfError || error{
     ConfChangeTooLarge,
     ConfChangeLogFull,
 };
-pub const StepError = ReceiveError || ProposeError || ConfChangeError ||
+pub const ReadIndexError = error{ ReadIndexNotLeader, ReadIndexNotReady, ReadIndexFull };
+pub const StepError = ReceiveError || ProposeError || ConfChangeError || ReadIndexError ||
     error{SnapshotUnexpected};
 pub const InvariantError = log_module.Log.InvariantError || error{
     InvariantCommitBeyondLog,
@@ -163,6 +180,7 @@ pub const InvariantError = log_module.Log.InvariantError || error{
     InvariantInflightOverflow,
     InvariantBaseBeyondApplied,
     InvariantConfigurationInvalid,
+    InvariantReadOrder,
 };
 
 const std = @import("std");

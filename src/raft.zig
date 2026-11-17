@@ -21,6 +21,7 @@ pub const Restore = node.Restore;
 pub const Input = node.Input;
 pub const Effect = node.Effect;
 pub const Effects = node.Effects;
+pub const Read = node.Read;
 pub const SnapshotDue = node.SnapshotDue;
 pub const SnapshotSend = node.SnapshotSend;
 pub const Role = node.Role;
@@ -30,6 +31,7 @@ pub const InitError = node.InitError;
 pub const ReceiveError = node.ReceiveError;
 pub const ProposeError = node.ProposeError;
 pub const ConfChangeError = node.ConfChangeError;
+pub const ReadIndexError = node.ReadIndexError;
 pub const StepError = node.StepError;
 pub const InvariantError = node.InvariantError;
 
@@ -60,4 +62,7 @@ test {
     _ = @import("raft/node_reconfigure_test.zig");
     // Joint consensus in the node, follower, restore and non-voter side (plan 005 item 8).
     _ = @import("raft/node_reconfigure_follower_test.zig");
+    // ReadIndex: the pending-read state, the node steps and the invariants (plan 005 item 9).
+    _ = @import("raft/read_test.zig");
+    _ = @import("raft/node_read_test.zig");
 }

@@ -56,6 +56,7 @@ test "node: a fresh restore starts a follower with zeroed status and no leader" 
         .last_index = .zero,
         .snapshot_index = .zero,
         .configuration_index = .zero,
+        .reads_pending = 0,
     };
     try testing.expectEqual(expected, rig.node.status());
     try testing.expectEqual(@as(usize, 0), rig.node.entries().len);
@@ -77,6 +78,7 @@ test "node: restore keeps term, vote, commit and last index and applies nothing 
         .last_index = idx(3),
         .snapshot_index = .zero,
         .configuration_index = .zero,
+        .reads_pending = 0,
     };
     try testing.expectEqual(expected, rig.node.status());
     try fixtures.expect_entries_equal(&base_entries, rig.node.entries());
