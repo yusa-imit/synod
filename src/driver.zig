@@ -190,6 +190,7 @@ pub const Driver = struct {
     ) (raft.ReceiveError || Fault)!void {
         _ = io;
         assert(!driver.stopped);
+        driver.reads_done_len = 0;
         const effects = driver.node.step(.{ .message = message }) catch |err| {
             // A message input cannot produce a `Propose*` error, so the cast only narrows.
             return @errorCast(err);
@@ -207,6 +208,7 @@ pub const Driver = struct {
     ) (raft.ProposeError || Fault)!void {
         _ = io;
         assert(!driver.stopped);
+        driver.reads_done_len = 0;
         const effects = driver.node.step(.{ .propose = data }) catch |err| {
             // A propose input cannot produce a message error, so the cast only narrows.
             return @errorCast(err);
@@ -217,7 +219,7 @@ pub const Driver = struct {
 
     /// Registers a ReadIndex read (leader only) and executes the effects. The read completes in
     /// a later call, visible through `reads_done` (`ready` or `failed`). Precondition: not
-    /// stopped. Red stub: the node refuses every read; completions are never recorded.
+    /// stopped. A refused read returns its error and records nothing.
     pub fn read_index(
         driver: *Driver,
         io: Io,
@@ -225,6 +227,7 @@ pub const Driver = struct {
     ) (raft.ReadIndexError || Fault)!void {
         _ = io;
         assert(!driver.stopped);
+        driver.reads_done_len = 0;
         const effects = driver.node.step(.{ .read_index = ctx }) catch |err| {
             // A read input cannot produce a message, propose or conf-change error.
             return @errorCast(err);
@@ -234,7 +237,7 @@ pub const Driver = struct {
     }
 
     /// The reads that completed in the last `receive`, `propose`, `poll` or `read_index` call,
-    /// in effect order; borrowed until the next such call. Red stub: always empty.
+    /// in effect order; borrowed until the next such call.
     pub fn reads_done(driver: *const Driver) []const ReadDone {
         assert(driver.reads_done_len <= driver.reads_done_buffer.len);
         return driver.reads_done_buffer[0..driver.reads_done_len];
@@ -247,6 +250,7 @@ pub const Driver = struct {
         assert(!driver.stopped);
         const now_ms = driver.deps.clock.now_ms();
         assert(now_ms >= driver.last_tick_ms);
+        driver.reads_done_len = 0;
 
         const elapsed_ticks = @divFloor(now_ms - driver.last_tick_ms, driver.options.tick_ms);
         const run_count: u64 = @min(elapsed_ticks, driver.options.ticks_per_poll_max);
@@ -328,6 +332,18 @@ pub const Driver = struct {
         try driver.deps.state_machine.restore(&reader);
     }
 
+    /// Appends `reads` to `reads_done` with `outcome`. Never overflows: the node holds at most
+    /// `reads_max` reads and a call completes each read at most once (only `read_index` adds one).
+    fn reads_record(driver: *Driver, reads: []const raft.Read, outcome: ReadOutcome) void {
+        const buffer = driver.reads_done_buffer;
+        assert(driver.reads_done_len <= buffer.len);
+        assert(reads.len <= buffer.len - driver.reads_done_len);
+        for (reads) |read| {
+            buffer[driver.reads_done_len] = .{ .read = read, .outcome = outcome };
+            driver.reads_done_len += 1;
+        }
+    }
+
     /// Runs one step's effects in order. The persist phase sets `unsynced`; the first later
     /// effect of a send or apply phase is preceded by exactly one `sync`.
     fn execute(driver: *Driver, effects: Effects) Fault!void {
@@ -354,7 +370,8 @@ pub const Driver = struct {
                     for (entries) |*entry| try driver.deps.state_machine.apply(entry);
                 },
                 .leader_changed => {},
-                .read_ready, .read_failed => {}, // Red stub: never recorded.
+                .read_ready => |reads| driver.reads_record(reads, .ready),
+                .read_failed => |reads| driver.reads_record(reads, .failed),
                 .save_snapshot => |*record| {
                     try store.save_snapshot(&record.snapshot, &record.configuration);
                 },

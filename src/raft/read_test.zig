@@ -380,7 +380,8 @@ test "read: a leader removed by a committed leave_joint fails its pending read i
     const entered = try accept(&rig, try seen.request(3)); // enter_joint commits.
     try expect_no_ready(entered);
     try testing.expectEqual(idx(3), rig.node.status().last_index); // leave_joint appended.
-    seen.absorb(entered);
+    // ADR-009: `leave_joint` is sent with each peer's next send, so peer 2 gets it at a heartbeat.
+    try beat(&rig, &seen, entered);
     try expect_no_ready(try accept(&rig, try seen.request(2))); // Settled {2,3,4}: one of three.
 
     const left = try accept(&rig, try seen.request(3)); // leave_joint commits: 1 steps down.

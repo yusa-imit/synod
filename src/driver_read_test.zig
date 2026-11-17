@@ -107,12 +107,14 @@ const H = struct {
         h.sm = .{};
         h.clock = .{ .now = 1000 };
         h.rng = .{ .state = 0, .forced = 0 }; // Election timeout of exactly `t` ticks.
-        try h.store.init(gpa, .{
+        // The store is the host's, not the driver's: ADR-009 sizes `Driver.init_bytes_max` for the
+        // driver and node allocations only, so the store never draws from the driver's `gpa`.
+        try h.store.init(testing.allocator, .{
             .entries_max = 16,
             .data_bytes_max = 128,
             .snapshot_bytes_max = 16,
         });
-        errdefer h.store.deinit(gpa);
+        errdefer h.store.deinit(testing.allocator);
         const deps: Driver.Deps = .{
             .store = LogStore.init(&h.store),
             .transport = Transport.init(&h.wire),
@@ -125,7 +127,7 @@ const H = struct {
 
     fn deinit(h: *H, gpa: std.mem.Allocator) void {
         h.driver.deinit(testing.io, gpa);
-        h.store.deinit(gpa);
+        h.store.deinit(testing.allocator);
     }
 
     fn check(h: *H) !void {
