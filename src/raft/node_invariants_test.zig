@@ -143,6 +143,7 @@ fn describe_invariant(err: node_module.InvariantError) u8 {
         error.InvariantElectionTimeout,
         error.InvariantBaseBeyondApplied,
         error.InvariantConfigurationInvalid,
+        error.InvariantReadOrder,
         => 1,
         error.InvariantEntryDataMisplaced,
         error.InvariantProgressOrder,

@@ -238,6 +238,7 @@ fn slot_ensure(node: *Node, peer: NodeId) void {
     const before_entry: Index = @enumFromInt(@intFromEnum(node.log.last_index()) - 1);
     node.progress[slot] = Progress.init(before_entry, node.config.inflight_max);
     node.peers[slot] = peer;
+    node.reads.acked[slot] = 0; // A new peer has acked no round of ours.
     const base = leader_module.records_base(node, slot);
     @memset(node.rounds.records[base..][0..node.config.inflight_max], Round.empty);
     node.progress_len = slot + 1;
@@ -249,6 +250,7 @@ fn slot_remove(node: *Node, slot: u32) void {
     if (slot != last) {
         node.progress[slot] = node.progress[last];
         node.peers[slot] = node.peers[last];
+        node.reads.acked[slot] = node.reads.acked[last];
         const to = leader_module.records_base(node, slot);
         const from = leader_module.records_base(node, last);
         const width = node.config.inflight_max;
@@ -257,6 +259,7 @@ fn slot_remove(node: *Node, slot: u32) void {
     const stale = leader_module.records_base(node, last);
     @memset(node.rounds.records[stale..][0..node.config.inflight_max], Round.empty);
     node.peers[last] = .none;
+    node.reads.acked[last] = 0;
     node.progress_len = last;
 }
 

@@ -132,7 +132,6 @@ pub const Node = struct {
         rng: Rng,
     ) InitError!void {
         node_init.assert_config(&config);
-        assert(restore.entries.len < std.math.maxInt(u32));
         try node_init.restore_validate(&config, restore);
 
         var log: log_module.Log = undefined;
@@ -153,9 +152,6 @@ pub const Node = struct {
 
         const leader_storage = try leader_module.Storage.init(gpa, &config);
         errdefer leader_storage.deinit(gpa);
-
-        const reads_storage = try read_module.Storage.init(gpa, &config);
-        errdefer reads_storage.deinit(gpa);
 
         node_init.storage_clear(log.entries, bytes, members, votes, effects);
         const region = node_init.members_split(members, &config);
@@ -188,7 +184,7 @@ pub const Node = struct {
             .progress_len = 0,
             .peers = leader_storage.peers,
             .rounds = leader_storage.rounds,
-            .reads = reads_storage,
+            .reads = leader_storage.reads,
         };
         node.log.reset(restore.snapshot);
         try node_init.restore_entries(node, restore);

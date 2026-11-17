@@ -42,6 +42,7 @@ fn obs(node: u8, commit: u64, log: []const Entry) Observation {
         .last_index = fx.idx(log.len),
         .snapshot_index = .zero,
         .configuration_index = .zero,
+        .reads_pending = 0,
     };
     return .{ .node_index = node, .status = status, .log = log };
 }

@@ -43,8 +43,8 @@ pub const Seen = struct {
     pub fn absorb(seen: *Seen, effects: Effects) void {
         for (effects.items) |effect| switch (effect) {
             .send => |message| switch (message) {
-                .append_entries => |request| {
-                    seen.latest[@intFromEnum(request.header.to)] = request;
+                .append_entries => |sent| {
+                    seen.latest[@intFromEnum(sent.header.to)] = sent;
                     seen.count += 1;
                 },
                 else => {},

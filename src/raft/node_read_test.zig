@@ -5,8 +5,8 @@
 //! emitted after `apply`; `reads_max` bounds the pending reads.
 //!
 //! Assumed API that does not exist yet (the red reason): the behavior behind `Input.read_index`
-//! (the scaffold refuses every read with `ReadIndexFull`), `Effect.read_ready`, `Effect.read_failed`
-//! and `Status.reads_pending`. Names assumed: `Input{ .read_index = ctx }`,
+//! (the scaffold refuses every read with `ReadIndexFull`), `Effect.read_ready`,
+//! `Effect.read_failed` and `Status.reads_pending`. Names assumed: `Input{ .read_index = ctx }`,
 //! `node.ReadIndexError`, `Config.reads_max`.
 //!
 //! Expected values come from the ADR and plain arithmetic (majorities, round ids as the node

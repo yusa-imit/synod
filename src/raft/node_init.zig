@@ -160,6 +160,7 @@ pub fn election_timeout_draw(rng: Rng, election_ticks: u32) u32 {
 
 /// Pure data check of `Restore`; allocates nothing. `RestoreLogFull` is decided at copy time.
 pub fn restore_validate(config: *const Config, restore: *const Restore) InitError!void {
+    assert(restore.entries.len < std.math.maxInt(u32));
     const configuration = &restore.configuration;
     try configuration.validate();
     if (configuration.voters.len > config.voters_max) return error.ConfVotersTooMany;
